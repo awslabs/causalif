@@ -5,9 +5,10 @@
 
 from typing import List
 
+
 class CausalifPrompts:
     """Causalif prompt templates based on the paper"""
-    
+
     @staticmethod
     def background_reminder(factors: List[str], domains: List[str]) -> str:
         return f"""As a scientific researcher in the domains of {', '.join(domains)}, you need to clarify the statistical relationship between some pairs of factors. You first need to get clear of the meanings of the factors in {factors}, which are from your domains, and clarify the interaction between each pair of those factors."""
