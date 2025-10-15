@@ -7,7 +7,9 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+    requirements = [
+        line.strip() for line in fh if line.strip() and not line.startswith("#")
+    ]
 
 setup(
     name="causalif",
@@ -58,7 +60,7 @@ setup(
     project_urls={
         "Bug Reports": "https://github.com/bossubhr/Causalif-private/issues",
         "Source": "https://github.com/bossubhr/Causalif-private",
-        #"Documentation": "https://causalif.readthedocs.io/",
-        "Documentation": "https://github.com/bossubhr/Causalif-private/blob/feature-Subhro/README.md"
+        # "Documentation": "https://causalif.readthedocs.io/",
+        "Documentation": "https://github.com/bossubhr/Causalif-private/blob/feature-Subhro/README.md",
     },
 )
