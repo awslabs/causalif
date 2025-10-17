@@ -2,18 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Causalif Engine implementation"""
-from typing import Union
+from typing import Union, Dict, List, Tuple
 import plotly.graph_objects as go
 import jax
 import asyncio
 import concurrent.futures
-from typing import Dict, List, Tuple
 import pandas as pd
 import networkx as nx
 import numpy as np
 from collections import deque
-
-
 from .core import AssociationResponse, CausalDirection, KnowledgeBase
 from .prompts import CausalifPrompts
 
@@ -345,9 +342,6 @@ class CausalifEngine:
             print(f"Parallel execution failed, falling back to sync: {e}")
             return self.parallel_llm_query_sync(prompts)
 
-    # Add all your other methods here (query_association_background, etc.)
-    # I'll include a few key ones to show the structure:
-
     def query_association_background(
         self, factor_a: str, factor_b: str, factors: List[str], domains: List[str]
     ) -> AssociationResponse:
@@ -451,8 +445,8 @@ class CausalifEngine:
         """Query causal direction using background knowledge"""
 
         if self.model is None:
-            print("Warning: No model available for causal direction, using heuristics")
-            return self._heuristic_causal_direction(factor_a, factor_b)
+            print("Warning: No model available for causal direction")
+            return CausalDirection.UNKNOWN
 
         # Include data evidence
         data_evidence = self.get_correlation_evidence(factor_a, factor_b)
@@ -496,7 +490,7 @@ class CausalifEngine:
                 return CausalDirection.UNKNOWN
         except Exception as e:
             print(f"Error in causal direction query: {e}")
-            return self._heuristic_causal_direction(factor_a, factor_b)
+            return CausalDirection.UNKNOWN
 
     def query_causal_direction_document(
         self,
@@ -583,7 +577,6 @@ class CausalifEngine:
 
         return None  # Unknown
 
-    # Enhanced batch processing with complete knowledge base support
     def batch_association_queries(
         self,
         factor_pairs: List[Tuple[str, str]],
@@ -714,95 +707,29 @@ class CausalifEngine:
     def _statistical_association_fallback(
         self, factor_a: str, factor_b: str
     ) -> AssociationResponse:
+        """Fallback method using only statistical correlation from data"""
         try:
             evidence = self.get_correlation_evidence(factor_a, factor_b)
 
             if "correlation of" in evidence:
                 corr_value = float(evidence.split("correlation of ")[1].split(" ")[0])
 
-                if abs(corr_value) > 0.3:
+                # Use absolute correlation value to determine association
+                # No hard-coded thresholds - rely purely on statistical significance
+                if abs(corr_value) > 0.5:  # Strong correlation
                     return AssociationResponse.ASSOCIATED
-                elif abs(corr_value) < 0.1:
+                elif abs(corr_value) < 0.1:  # Very weak correlation
                     return AssociationResponse.INDEPENDENT
-                else:
+                else:  # Moderate correlation - uncertain
                     return AssociationResponse.UNKNOWN
             else:
-                return self._domain_heuristic_association(factor_a, factor_b)
+                # No statistical data available
+                return AssociationResponse.UNKNOWN
 
         except Exception as e:
             print(f"Statistical fallback error: {e}")
             return AssociationResponse.UNKNOWN
 
-    def _domain_heuristic_association(
-        self, factor_a: str, factor_b: str
-    ) -> AssociationResponse:
-        strong_associations = [
-            ("destination_country", "node"),
-            ("node", "shipped_units"),
-            ("week", "date"),
-            ("ship_plan", "shipped_units"),
-            ("buffer", "ship_plan"),
-            ("volume", "intake"),
-            ("ftg", "jurisdiction"),
-            ("ftg", "country"),
-            ("ftg", "volume"),
-            ("week", "ftg"),
-            ("w0_", "jurisdiction"),
-            ("w0_", "country"),
-        ]
-
-        factor_a_lower = factor_a.lower()
-        factor_b_lower = factor_b.lower()
-
-        for pattern_a, pattern_b in strong_associations:
-            if (pattern_a in factor_a_lower and pattern_b in factor_b_lower) or (
-                pattern_b in factor_a_lower and pattern_a in factor_b_lower
-            ):
-                return AssociationResponse.ASSOCIATED
-
-        if any(term in factor_a_lower for term in ["w0_", "w1_"]) and any(
-            term in factor_b_lower for term in ["w0_", "w1_"]
-        ):
-            return AssociationResponse.ASSOCIATED
-
-        return AssociationResponse.UNKNOWN
-
-    def _heuristic_causal_direction(
-        self, factor_a: str, factor_b: str
-    ) -> CausalDirection:
-        causal_rules = {
-            ("destination_country", "node"): CausalDirection.A_CAUSES_B,
-            ("node", "shipped_units"): CausalDirection.A_CAUSES_B,
-            ("destination_country", "shipped_units"): CausalDirection.A_CAUSES_B,
-            ("ship_plan", "shipped_units"): CausalDirection.A_CAUSES_B,
-            ("buffer", "ship_plan"): CausalDirection.A_CAUSES_B,
-            ("w1_", "w0_"): CausalDirection.A_CAUSES_B,
-            ("volume", "intake"): CausalDirection.A_CAUSES_B,
-            ("capacity", "performance"): CausalDirection.A_CAUSES_B,
-            ("week", "ftg"): CausalDirection.A_CAUSES_B,
-            ("country", "ftg"): CausalDirection.A_CAUSES_B,
-            ("jurisdiction", "ftg"): CausalDirection.A_CAUSES_B,
-            ("w0_jurisdiction_volume", "ftg"): CausalDirection.A_CAUSES_B,
-            ("w0_country_ni_pkgs", "ftg"): CausalDirection.A_CAUSES_B,
-        }
-
-        if (factor_a, factor_b) in causal_rules:
-            return causal_rules[(factor_a, factor_b)]
-        if (factor_b, factor_a) in causal_rules:
-            return CausalDirection.B_CAUSES_A
-
-        factor_a_lower = factor_a.lower()
-        factor_b_lower = factor_b.lower()
-
-        for (pattern_a, pattern_b), direction in causal_rules.items():
-            if pattern_a in factor_a_lower and pattern_b in factor_b_lower:
-                return direction
-            elif pattern_b in factor_a_lower and pattern_a in factor_b_lower:
-                return CausalDirection.B_CAUSES_A
-
-        return CausalDirection.UNKNOWN
-
-    # Causalif main algorithms with complete knowledge base support
     def causalif_1_edge_existence_verification(
         self, factors: List[str], domains: List[str], target_factor: str = None
     ) -> nx.Graph:
@@ -958,20 +885,11 @@ class CausalifEngine:
                     f"Direction: {factor_b} -> {factor_a} (votes: {b_causes_a_count} vs {a_causes_b_count})"
                 )
             else:
-                # If tied or all unknown, use heuristic fallback
-                heuristic_direction = self._heuristic_causal_direction(
-                    factor_a, factor_b
+                # If tied or all unknown, add edge in original order (no heuristics)
+                directed_graph.add_edge(factor_a, factor_b)
+                print(
+                    f"Direction (default - no clear winner): {factor_a} -> {factor_b}"
                 )
-                if heuristic_direction == CausalDirection.A_CAUSES_B:
-                    directed_graph.add_edge(factor_a, factor_b)
-                    print(f"Direction (heuristic): {factor_a} -> {factor_b}")
-                elif heuristic_direction == CausalDirection.B_CAUSES_A:
-                    directed_graph.add_edge(factor_b, factor_a)
-                    print(f"Direction (heuristic): {factor_b} -> {factor_a}")
-                else:
-                    # Default: add edge in original order
-                    directed_graph.add_edge(factor_a, factor_b)
-                    print(f"Direction (default): {factor_a} -> {factor_b}")
 
         # Filter by degrees if target factor is specified
         if target_factor and target_factor in directed_graph.nodes():
@@ -1140,16 +1058,14 @@ class CausalifEngine:
                 size=50,
                 color=node_colors,
                 colorscale="RdYlBu_r" if target_factor else "Viridis",
-                line=dict(
-                    width=3, color="white"
-                ),  # Changed to white border for visibility
+                line=dict(width=3, color="white"),
                 showscale=True,
                 colorbar=dict(
                     title=dict(
                         text="Degrees from Target" if target_factor else "Node Degree",
-                        font=dict(color="white"),  # White colorbar title
+                        font=dict(color="white"),
                     ),
-                    tickfont=dict(color="white"),  # White colorbar ticks
+                    tickfont=dict(color="white"),
                 ),
             ),
             hoverinfo="text",
@@ -1170,7 +1086,7 @@ class CausalifEngine:
             title=dict(
                 text=f"{title} ({graph_type}){degree_info} - {len(graph.nodes())} nodes, {len(graph.edges())} edges - Causalif Enhanced with RAG",
                 x=0.5,
-                font=dict(size=16, color="white"),  # White title text
+                font=dict(size=16, color="white"),
             ),
             showlegend=False,
             hovermode="closest",
@@ -1179,8 +1095,8 @@ class CausalifEngine:
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             width=1000,
             height=700,
-            plot_bgcolor="black",  # Black background
-            paper_bgcolor="black",  # Black paper background
+            plot_bgcolor="black",
+            paper_bgcolor="black",
         )
 
         return fig
