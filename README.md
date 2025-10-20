@@ -4,7 +4,8 @@ LLM assisted Causal Reasoning with JAX and RAG
 
 # Architecture and usage in applications
 
-Coming soon
+![Library architecture:](docs/library_integrations.png)
+![Overall design where causalif integrates with agentic applciations:](docs/overall_design.png)
 
 # prerequisites
 
