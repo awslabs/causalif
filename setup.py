@@ -13,7 +13,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="causalif",
-    version="0.1.0",
+    version="0.1.4",
     author="Subhro Bose",
     author_email="bossubhr@amazon.co.uk",
     description="LLM assisted causal reasoning with JAX and RAG",
