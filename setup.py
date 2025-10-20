@@ -13,7 +13,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="causalif",
-    version="0.1.4",
+    version="0.1.5",
     author="Subhro Bose",
     author_email="bossubhr@amazon.co.uk",
     description="LLM assisted causal reasoning with JAX and RAG",
@@ -25,7 +25,7 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: Apache 2.0 License",
+        "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
