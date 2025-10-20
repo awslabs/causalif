@@ -1,6 +1,9 @@
 # Causal Inference Framework for AWS (causalif)
 
-LLM assisted Causal Reasoning with JAX and RAG
+LLM assisted causal reasoning library built with JAX and RAG. Designed primarily for agentic LLM applications, this library can also be used standalone in Jupyter notebooks with access to Bedrock.
+
+github: https://github.com/awslabs/causalif  
+pypi: https://pypi.org/project/causalif/
 
 # Architecture and usage in applications
 
@@ -72,14 +75,14 @@ result = causalif_tool("Why is water so low in body after we wake up?")
 
 <pre>```python
 """
-Allowed formation of enqueries:
+Allowed formation of enqueries (<\target_factor> is the column or factor whose dependencies with other variables we want to analyze):
 
-why (is|are) <target factor> so (low|high|poor|bad|good)",
-what (causes|affects|influences) <target factor>",
-<target factor> (is|are) too (low|high)",
-analyze the causes (of|for) <target factor>",
-dependencies (of|for) <target factor>,
-factors (affecting|influencing) <target factor>"
+1. why (is|are) <\target_factor> so (low|high|poor|bad|good),
+2. what (causes|affects|influences) <\target_factor>,
+3. <\target_factor> (is|are) too (low|high)",
+4. analyze the causes (of|for) <\target_factor>,
+5. dependencies (of|for) <\target_factor>,
+6. factors (affecting|influencing) <\target_factor>
 """
 ```</pre>
 
