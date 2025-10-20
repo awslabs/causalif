@@ -101,8 +101,6 @@ class CausalifEngine:
 
         if isinstance(graph, nx.DiGraph):
             filtered_graph = graph.subgraph(nodes_within_degrees).copy()
-        else:
-            filtered_graph = graph.subgraph(nodes_within_degrees).copy()
 
         print(
             f"Filtered graph to {len(filtered_graph.nodes())} nodes within {max_degrees} degrees of {target_factor}"
