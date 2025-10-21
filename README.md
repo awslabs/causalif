@@ -12,6 +12,8 @@ pypi: https://pypi.org/project/causalif/
 
 # Example usage
 
+example notebook: https://github.com/awslabs/causalif/blob/subhro/bug_fix/examples/causalif.ipynb
+
 # Prerequisites
 
 This library is based on RAG; it requires a knowledgebase to be ready before using this library. Below steps are required to be performed before using this library.
