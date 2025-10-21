@@ -4,7 +4,7 @@
 Causalif: Language-Augmented Causal Reasoning with JAX and RAG
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.6"
 __author__ = "Subhro Bose"
 __email__ = "bossubhr@amazon.co.uk"
 
