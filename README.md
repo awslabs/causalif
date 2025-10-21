@@ -105,3 +105,9 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ## License
 
 This project is licensed under the Apache-2.0 License.
+
+## version updates
+
+v 0.1.4 -> base version
+v 0.1.5 -> readme update
+v 0.1.6 -> removed directed graph dependecies from engine.py and added an example notebook
