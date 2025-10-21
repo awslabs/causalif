@@ -12,11 +12,17 @@ pypi: https://pypi.org/project/causalif/
 
 # Example usage
 
+## Jupyter notebook
+
 example notebook: https://github.com/awslabs/causalif/blob/subhro/bug_fix/examples/causalif.ipynb
 
 example causal graph:
 
 ![Causal graph:](docs/causal_graph.png)
+
+## Agentic integration
+
+![Agentic integration:](docs/agentic_integration.png)
 
 # Prerequisites
 
