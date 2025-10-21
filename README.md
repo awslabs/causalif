@@ -14,6 +14,10 @@ pypi: https://pypi.org/project/causalif/
 
 example notebook: https://github.com/awslabs/causalif/blob/subhro/bug_fix/examples/causalif.ipynb
 
+example causal graph:
+
+![Causal graph:](docs/causal_graph.png)
+
 # Prerequisites
 
 This library is based on RAG; it requires a knowledgebase to be ready before using this library. Below steps are required to be performed before using this library.
