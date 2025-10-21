@@ -10,7 +10,9 @@ pypi: https://pypi.org/project/causalif/
 ![Library architecture:](docs/library_integrations.png)
 ![Overall design where causalif integrates with agentic applciations:](docs/overall_design.png)
 
-# prerequisites
+# Example usage
+
+# Prerequisites
 
 This library is based on RAG; it requires a knowledgebase to be ready before using this library. Below steps are required to be performed before using this library.
 
@@ -51,6 +53,7 @@ pip install causalif
 
 <pre>```python
 from causalif import set_causalif_engine, causalif_tool, visualize_causalif_results
+from langchain_aws import ChatBedrock
 ```</pre>
 
 ## Configure the engine
