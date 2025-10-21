@@ -99,8 +99,7 @@ class CausalifEngine:
                     nodes_within_degrees.add(neighbor)
                     queue.append((neighbor, current_degree + 1))
 
-        if isinstance(graph, nx.DiGraph):
-            filtered_graph = graph.subgraph(nodes_within_degrees).copy()
+        filtered_graph = graph.subgraph(nodes_within_degrees).copy()
 
         print(
             f"Filtered graph to {len(filtered_graph.nodes())} nodes within {max_degrees} degrees of {target_factor}"
@@ -734,7 +733,7 @@ class CausalifEngine:
         """Causalif 1: Edge Existence Verification Algorithm with complete knowledge base support"""
 
         print(
-            "Starting Causalif 1: Edge Existence Verification with complete RAG support"
+            "Starting Causalif 1: Edge Existence Verification with complete RAG support in causalif_local"
         )
 
         # Initialize complete undirected graph
@@ -918,13 +917,29 @@ class CausalifEngine:
         skeleton = self.causalif_1_edge_existence_verification(
             factors, domains, target_factor
         )
-        print(f"\nSkeleton edges: {list(skeleton.edges())}")
+
+        print(f"\n{'='*60}")
+        print(f"CAUSALIF 1 COMPLETE")
+        print(f"Skeleton has {len(skeleton.nodes())} nodes and {len(skeleton.edges())} edges")
+        print(f"Edges: {list(skeleton.edges())}")
+        print(f"{'='*60}\n")
+        
+        if len(skeleton.edges()) == 0:
+            print("⚠️ WARNING: Empty skeleton! No edges to orient.")
+            return skeleton, nx.DiGraph()
 
         # Causalif 2: Orientation (with complete knowledge base support)
         print("\n=== Causalif 2: Orientation with Complete RAG ===")
         causal_graph = self.causalif_2_orientation(
             skeleton, factors, domains, target_factor
         )
+
+        print(f"\n{'='*60}")
+        print(f"CAUSALIF 2 COMPLETE")
+        print(f"Causal graph has {len(causal_graph.nodes())} nodes and {len(causal_graph.edges())} edges")
+        print(f"Directed edges: {list(causal_graph.edges())}")
+        print(f"{'='*60}\n")
+        
         print(f"\nFinal causal graph edges: {list(causal_graph.edges())}")
 
         return skeleton, causal_graph

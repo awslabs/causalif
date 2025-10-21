@@ -12,6 +12,8 @@ pypi: https://pypi.org/project/causalif/
 
 # Example usage
 
+example notebook: https://github.com/awslabs/causalif/blob/subhro/bug_fix/examples/causalif.ipynb
+
 # Prerequisites
 
 This library is based on RAG; it requires a knowledgebase to be ready before using this library. Below steps are required to be performed before using this library.
@@ -103,3 +105,9 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ## License
 
 This project is licensed under the Apache-2.0 License.
+
+## version updates
+
+v 0.1.4 -> base version
+v 0.1.5 -> readme update
+v 0.1.6 -> removed directed graph dependecies from engine.py and added an example notebook
