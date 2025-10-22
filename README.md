@@ -20,7 +20,7 @@ example causal graph:
 
 ![Causal graph:](docs/causal_graph.png)
 
-## Agentic integration
+## Sample outcome when we integrate with agents
 
 ![Agentic integration:](docs/agentic_integration.png)
 
