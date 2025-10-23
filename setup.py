@@ -19,7 +19,7 @@ setup(
     description="LLM assisted causal reasoning with JAX and RAG",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/bossubhr/Causalif-private",
+    url="https://github.com/awslabs/causalif",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -58,9 +58,9 @@ setup(
     },
     keywords="causal reasoning, machine learning, nlp, rag, jax, networkx, causal inference, genai, llm",
     project_urls={
-        "Bug Reports": "https://github.com/bossubhr/Causalif-private/issues",
-        "Source": "https://github.com/bossubhr/Causalif-private",
+        "Bug Reports": "https://github.com/awslabs/causalif/issues",
+        "Source": "https://github.com/awslabs/causalif",
         # "Documentation": "https://causalif.readthedocs.io/",
-        "Documentation": "https://github.com/bossubhr/Causalif-private/blob/feature-Subhro/README.md",
+        "Documentation": "https://github.com/awslabs/causalif/blob/main/README.md",
     },
 )
