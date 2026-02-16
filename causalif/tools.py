@@ -22,9 +22,32 @@ def set_causalif_engine(
     domains=None,
     max_degrees: int = 5,
     max_parallel_queries: int = 50,
+    excluded_columns: List[str] = None,
+    max_related_factors: int = 12,
 ):
-    """Set the global Causalif engine instance with complete RAG support"""
+    """
+    Set the global Causalif engine instance with complete RAG support
+    
+    Args:
+        model: LLM model for causal reasoning
+        retriever_tool: RAG retriever tool for document knowledge
+        dataframe: DataFrame with observational data
+        factors: List of factors to analyze (if not using dataframe columns)
+        domains: List of domain names for context
+        max_degrees: Maximum degrees of separation to analyze (default: 5)
+        max_parallel_queries: Maximum parallel LLM queries (default: 50)
+        excluded_columns: List of column names to exclude from target factor selection 
+                         (default: ['week', 'country', 'destination_country', 'station', 
+                          'node', 'dow', 'date', 'sub_wk', 'rep_wk', 'plan_type'])
+        max_related_factors: Maximum number of related factors to include in analysis (default: 12)
+    """
     global _global_causalif_engine
+    
+    # Set default excluded columns if not provided
+    if excluded_columns is None:
+        excluded_columns = ['week', 'country', 'destination_country', 'station', 'node', 
+                           'dow', 'date', 'sub_wk', 'rep_wk', 'plan_type']
+    
     _global_causalif_engine = CausalifEngine(
         model=model,
         retriever_tool=retriever_tool,
@@ -34,17 +57,40 @@ def set_causalif_engine(
         k_documents=3,
         max_degrees=max_degrees,
         max_parallel_queries=max_parallel_queries,
+        excluded_columns=excluded_columns,
+        max_related_factors=max_related_factors,
     )
     print(
         f"Causalif engine configured with max_degrees={max_degrees}, max_parallel_queries={max_parallel_queries}"
     )
+    print(f"Excluded columns: {excluded_columns}")
+    print(f"Max related factors: {max_related_factors}")
     print(f"RAG retriever available: {retriever_tool is not None}")
 
 
 def extract_factors_from_query(
-    query: str, available_columns: List[str]
+    query: str, available_columns: List[str], excluded_columns: List[str] = None, max_related_factors: int = 12
 ) -> Tuple[str, List[str]]:
-    """Extract target factor and related factors from query"""
+    """
+    Extract target factor and related factors from query with enhanced pattern matching
+    
+    Args:
+        query: Natural language query
+        available_columns: List of available column names
+        excluded_columns: List of column names to exclude from target factor selection
+        max_related_factors: Maximum number of related factors to return
+        
+    Returns:
+        Tuple of (target_factor, related_factors)
+    """
+
+    # Use provided excluded columns or default
+    if excluded_columns is None:
+        excluded_columns = ['week', 'country', 'destination_country', 'station', 'node', 
+                           'dow', 'date', 'sub_wk', 'rep_wk', 'plan_type']
+    
+    # Convert to set for faster lookup (lowercase for case-insensitive matching)
+    EXCLUDED_COLUMNS = {col.lower() for col in excluded_columns}
 
     patterns = [
         r"why (?:is|are) ([\w_]+) (?:so )?(?:low|high|poor|bad|good)",
@@ -58,19 +104,38 @@ def extract_factors_from_query(
     query_lower = query.lower()
     target_factor = None
 
+    # STEP 1: Try exact word-by-word matching first (highest priority)
+    for col in available_columns:
+        if col.lower() not in EXCLUDED_COLUMNS:
+            # Check if the exact column name appears as a word in the query
+            import re as re_module
+            pattern = r'\b' + re_module.escape(col.lower()) + r'\b'
+            if re_module.search(pattern, query_lower):
+                target_factor = col
+                print(f"Exact match found: '{col}' in query")
+                break
+    
+    # If exact match found, skip pattern matching
+    if target_factor:
+        related_factors = [col for col in available_columns 
+                          if col != target_factor and col.lower() not in EXCLUDED_COLUMNS][:max_related_factors]
+        return target_factor, related_factors
+
+    # STEP 2: Pattern matching (if no exact match)
     for pattern in patterns:
         match = re.search(pattern, query_lower)
         if match:
             target_factor = match.group(1)
             for col in available_columns:
                 if target_factor in col.lower() or col.lower() in target_factor:
-                    target_factor = col
-                    break
+                    if col.lower() not in EXCLUDED_COLUMNS:
+                        target_factor = col
+                        break
             break
 
     if not target_factor:
         for col in available_columns:
-            if col.lower() in query_lower:
+            if col.lower() in query_lower and col.lower() not in EXCLUDED_COLUMNS:
                 target_factor = col
                 break
 
@@ -88,16 +153,19 @@ def extract_factors_from_query(
         ]
         for term in metric_terms:
             for col in available_columns:
-                if term in col.lower():
+                if term in col.lower() and col.lower() not in EXCLUDED_COLUMNS:
                     target_factor = col
                     break
             if target_factor:
                 break
 
     if not target_factor:
-        target_factor = available_columns[0] if available_columns else "ftg"
+        # Last resort: pick first non-excluded column
+        non_excluded_cols = [col for col in available_columns if col.lower() not in EXCLUDED_COLUMNS]
+        target_factor = non_excluded_cols[0] if non_excluded_cols else (available_columns[0] if available_columns else "ftg")
 
-    related_factors = [col for col in available_columns if col != target_factor][:12]
+    related_factors = [col for col in available_columns 
+                      if col != target_factor and col.lower() not in EXCLUDED_COLUMNS][:max_related_factors]
     return target_factor, related_factors
 
 
@@ -159,9 +227,11 @@ def causalif_tool(query: str) -> Dict:
         else:
             available_columns = ["life", "peace", "sleep", "good_food"]
 
-        # Extract factors from query
+        # Extract factors from query using engine's configuration
         target_factor, related_factors = extract_factors_from_query(
-            query, available_columns
+            query, available_columns, 
+            excluded_columns=causalif_engine.excluded_columns,
+            max_related_factors=causalif_engine.max_related_factors
         )
 
         print(f"Target factor: {target_factor}")
@@ -203,6 +273,9 @@ def causalif_tool(query: str) -> Dict:
             correlation_evidence = causalif_engine.get_correlation_evidence(
                 factor_a, factor_b
             )
+            
+            # Get edge strength if available (from Bayesian inference)
+            edge_strength = causal_graph[factor_a][factor_b].get('strength', None) if causal_graph.has_edge(factor_a, factor_b) else None
 
             # Calculate degree of separation for this relationship
             path_a = causalif_engine.get_relationship_path(
@@ -219,6 +292,7 @@ def causalif_tool(query: str) -> Dict:
                 "cause": factor_a,
                 "effect": factor_b,
                 "evidence": correlation_evidence,
+                "causal_strength": edge_strength,  # Added: Bayesian edge strength
                 "relationship_type": "causal",
                 "discovered_by": "Causalif_algorithm_with_RAG",
                 "degree_from_target": min_degree,
@@ -232,6 +306,7 @@ def causalif_tool(query: str) -> Dict:
                     {
                         "influencing_factor": factor_a,
                         "evidence": correlation_evidence,
+                        "causal_strength": edge_strength,  # Added: Bayesian edge strength
                         "relationship": relationship,
                         "degree": degree_a,
                     }
@@ -243,6 +318,7 @@ def causalif_tool(query: str) -> Dict:
                     {
                         "affected_factor": factor_b,
                         "evidence": correlation_evidence,
+                        "causal_strength": edge_strength,  # Added: Bayesian edge strength
                         "relationship": relationship,
                         "degree": degree_b,
                     }
