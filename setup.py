@@ -16,10 +16,10 @@ setup(
     version="0.1.6",
     author="Subhro Bose",
     author_email="bossubhr@amazon.co.uk",
-    description="LLM assisted causal reasoning with JAX and RAG",
+    description="LLM assisted causal reasoning with RAG",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/bossubhr/Causalif-private",
+    url="https://github.com/awslabs/causalif",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -27,15 +27,11 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.11",
     install_requires=requirements,
     extras_require={
         "dev": [
@@ -58,9 +54,9 @@ setup(
     },
     keywords="causal reasoning, machine learning, nlp, rag, jax, networkx, causal inference, genai, llm",
     project_urls={
-        "Bug Reports": "https://github.com/bossubhr/Causalif-private/issues",
-        "Source": "https://github.com/bossubhr/Causalif-private",
+        "Bug Reports": "https://github.com/awslabs/causalif/issues",
+        "Source": "https://github.com/awslabs/causalif",
         # "Documentation": "https://causalif.readthedocs.io/",
-        "Documentation": "https://github.com/bossubhr/Causalif-private/blob/feature-Subhro/README.md",
+        "Documentation": "https://github.com/awslabs/causalif/blob/main/README.md",
     },
 )

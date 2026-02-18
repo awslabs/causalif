@@ -1,9 +1,13 @@
 # Causal Inference Framework for AWS (causalif)
 
-LLM assisted causal reasoning library built with JAX and RAG. Designed primarily for agentic LLM applications, this library can also be used standalone in Jupyter notebooks with access to Bedrock.
+** New version coming on 19th Feb, 2026. **
+
+LLM assisted causal reasoning library built with RAG. Designed primarily for agentic LLM applications, this library can also be used standalone in Jupyter notebooks with access to Bedrock.
 
 github: https://github.com/awslabs/causalif  
 pypi: https://pypi.org/project/causalif/
+paper: https://arxiv.org/html/2402.15301v2
+
 
 # Architecture and usage in applications
 
@@ -12,17 +16,7 @@ pypi: https://pypi.org/project/causalif/
 
 # Example usage
 
-## Jupyter notebook
-
 example notebook: https://github.com/awslabs/causalif/blob/subhro/bug_fix/examples/causalif.ipynb
-
-example causal graph:
-
-![Causal graph:](docs/causal_graph.png)
-
-## Sample outcome when we integrate with agents
-
-![Agentic integration:](docs/agentic_integration.png)
 
 # Prerequisites
 
