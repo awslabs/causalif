@@ -1,12 +1,13 @@
 # Causal Inference Framework for AWS (causalif)
 
-# New version coming on 19th Feb, 2026.
+# New version is under review and delayed until 21st Feb, 2026.
+
 
 LLM assisted causal reasoning library built with RAG. Designed primarily for agentic LLM applications, this library can also be used standalone in Jupyter notebooks with access to Bedrock.
 
 github: https://github.com/awslabs/causalif  
 pypi: https://pypi.org/project/causalif/
-paper: https://arxiv.org/html/2402.15301v2
+reference paper: https://arxiv.org/html/2402.15301v2
 
 
 # Architecture and usage in applications
