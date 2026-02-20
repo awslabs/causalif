@@ -35,6 +35,7 @@ Note: LLM interpretation of causalif is best realised when this library is used 
 
 **GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif)  
 **PyPI**: [causalif](https://pypi.org/project/causalif/)
+**Reference paper for LACR 1 algorithm**: https://arxiv.org/html/2402.15301v2
 
 ---
 
@@ -518,7 +519,7 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
--- **v0.1.9.1**: Remeved LLM based causal directions and introduced bayesian based causal direction with hill climb search and immediate upstream and downstream effects. Building a hybrid graph with associations and causal directions.
+- **v0.1.9.1**: Remeved LLM based causal directions and introduced bayesian based causal direction with hill climb search and immediate upstream and downstream effects. Building a hybrid graph with associations and causal directions.
 - **v0.1.6**: Removed directed graph dependencies, added example notebook.
 - **v0.1.5**: README updates.
 - **v0.1.4**: Base version with complete Causalif algorithm.
