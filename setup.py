@@ -13,10 +13,10 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="causalif",
-    version="0.1.6",
+    version="0.1.7",
     author="Subhro Bose",
     author_email="bossubhr@amazon.co.uk",
-    description="LLM assisted causal reasoning with RAG",
+    description="Large Language Models (LLMs) with Bayesian causal inference to discover causal relationships and associations from observational data and domain knowledge",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/awslabs/causalif",
