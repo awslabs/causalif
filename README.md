@@ -34,8 +34,7 @@ This hybrid approach enables causal discovery and associations even with limited
 Note: LLM interpretation of causalif is best realised when this library is used as a tool in agentic systems.
 
 **GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif)  
-**PyPI**: [causalif](https://pypi.org/project/causalif/)
-**Reference paper for LACR 1 algorithm**: https://arxiv.org/html/2402.15301v2
+**PyPI**: [causalif](https://pypi.org/project/causalif/) (**reference paper for LACR 1 algorithm**: https://arxiv.org/html/2402.15301v2)
 
 ---
 
@@ -472,7 +471,7 @@ causalif/
 
 ## Limitations
 
-### This method isn't ideal for only qualtitative data and requirements with feedback loops. This method is built aiming finding hybrid association and causality among qualitative and quatitative data sets. 
+### This method isn't ideal for only quantitative data and feedback loop driven inference. This method is built aiming finding hybrid association and causality among qualitative and quatitative data sets. 
 
 ### Data & Computational
 
