@@ -430,7 +430,7 @@ fig.write_image("causal_graph.png")  # Requires kaleido
 
 ### System Integration
 
-![Library Architecture](docs/library_integrations.png)
+![Library Architecture](docs/overall_design.png)
 
 Causalif integrates with agentic LLM applications as a tool:
 
@@ -536,23 +536,6 @@ Please report bugs and feature requests on [GitHub Issues](https://github.com/aw
 
 This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) for details.
 
----
-
-## Citation
-
-If you use Causalif in your work, please reference:
-
-```bibtex
-@software{causalif,
-  title={Causal Inference Framework for AWS (causalif) },
-  author={Bose, Subhro},
-  year={2026},
-  url={https://github.com/awslabs/causalif},
-  note={Python library for LLM-assisted causal discovery with RAG}
-}
-```
-
----
 
 ## Version History
 
