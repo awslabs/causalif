@@ -449,7 +449,7 @@ causalif/
 ├── prompts.py        # CausalifPrompts (LLM prompt templates)
 ├── tools.py          # causalif_tool, set_causalif_engine (LangChain integration)
 ├── visualization.py  # visualize_causalif_results (Plotly graphs)
-└── __init__.py       # Public API exports
+└── __init__.py       # Public input exports
 ```
 
 ### Key Classes
@@ -460,10 +460,10 @@ causalif/
 - `run_complete_causalif()`: End-to-end pipeline
 - `batch_association_queries()`: Parallel LLM queries
 - `batch_causal_direction_queries()`: Parallel direction queries
-- `visualize_graph()`: Interactive visualization
+- `visualize_graph()`: Visualization
 
 **KnowledgeBase**:
-- `kb_type`: "BG" (background), "DOC" (document), or "PC" (statistical)
+- `kb_type`: "BG" (background), "DOC" (document)
 - `content`: Knowledge content
 - `source`: Source identifier
 
@@ -505,27 +505,6 @@ causalif/
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-### Development Setup
-
-```bash
-# Clone repository
-git clone https://github.com/awslabs/causalif.git
-cd causalif
-
-# Install development dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/
-
-# Format code
-black causalif/
-flake8 causalif/
-
-# Type checking
-mypy causalif/
-```
-
 ### Reporting Issues
 
 Please report bugs and feature requests on [GitHub Issues](https://github.com/awslabs/causalif/issues).
@@ -539,9 +518,10 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
-- **v0.1.6** (Current): Removed directed graph dependencies, added example notebook
-- **v0.1.5**: README updates
-- **v0.1.4**: Base version with complete Causalif algorithm
+-- **v0.1.9.1**: Remeved LLM based causal directions and introduced bayesian based causal direction with hill climb search and immediate upstream and downstream effects. Building a hybrid graph with associations and causal directions.
+- **v0.1.6**: Removed directed graph dependencies, added example notebook.
+- **v0.1.5**: README updates.
+- **v0.1.4**: Base version with complete Causalif algorithm.
 
 ---
 
