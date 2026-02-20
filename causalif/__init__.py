@@ -4,7 +4,7 @@
 CausalIF: Language-Augmented Causal Reasoning with Bayesian Inference
 """
 
-__version__ = "0.1.9"
+__version__ = "0.1.9.1"
 __author__ = "Subhro Bose"
 __email__ = "bossubhr@amazon.co.uk"
 
