@@ -1,3 +1,59 @@
+Metadata-Version: 2.4
+Name: causalif
+Version: 0.1.9
+Summary: Large Language Models (LLMs) with Bayesian causal inference to discover causal relationships and associations from observational data and domain knowledge
+Home-page: https://github.com/awslabs/causalif
+Author: Subhro Bose
+Author-email: bossubhr@amazon.co.uk
+Project-URL: Bug Reports, https://github.com/awslabs/causalif/issues
+Project-URL: Source, https://github.com/awslabs/causalif
+Project-URL: Documentation, https://github.com/awslabs/causalif/blob/main/README.md
+Keywords: causal reasoning,machine learning,nlp,rag,jax,networkx,causal inference,genai,llm
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Scientific/Engineering :: Information Analysis
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+License-File: NOTICE
+Requires-Dist: jax>=0.4.0
+Requires-Dist: jaxlib>=0.4.0
+Requires-Dist: pandas>=1.3.0
+Requires-Dist: networkx>=2.6.0
+Requires-Dist: plotly>=5.0.0
+Requires-Dist: langchain-core>=0.1.0
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: scikit-learn>=1.0.0
+Requires-Dist: nest-asyncio>=1.5.0
+Provides-Extra: dev
+Requires-Dist: pytest>=6.0; extra == "dev"
+Requires-Dist: pytest-cov>=2.0; extra == "dev"
+Requires-Dist: black>=21.0; extra == "dev"
+Requires-Dist: flake8>=3.8; extra == "dev"
+Requires-Dist: mypy>=0.800; extra == "dev"
+Provides-Extra: jupyter
+Requires-Dist: nest-asyncio>=1.5.0; extra == "jupyter"
+Requires-Dist: jupyter>=1.0.0; extra == "jupyter"
+Requires-Dist: ipywidgets>=7.0.0; extra == "jupyter"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
 # Causal Inference Framework for AWS (causalif)
 
 [![PyPI version](https://badge.fury.io/py/causalif.svg)](https://pypi.org/project/causalif/)
@@ -30,8 +86,6 @@ Causalif combines Large Language Models (LLMs) with Bayesian causal inference to
 - **Bayesian Structure Learning**: Data-driven causal graph orientation
 
 This hybrid approach enables causal discovery and associations even with limited data or when statistical methods alone are insufficient.
-
-Note: LLM interpretation of causalif is best realised when this library is used as a tool in agentic systems.
 
 **GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif)  
 **PyPI**: [causalif](https://pypi.org/project/causalif/)
@@ -95,9 +149,109 @@ Causalif implements a two-stage algorithm with parallel processing and RAG integ
 
 ### Architecture Diagram
 
-![Library Architecture](docs/causalif_flow_arch.png)
+```mermaid
+flowchart TD
+    Start([User Query]) --> Extract[Extract Target Factor<br/>& Related Factors]
+    Extract --> Init[Initialize Complete<br/>Undirected Graph]
+    
+    Init --> Stage1[STAGE 1: Edge Existence Verification]
+    
+    Stage1 --> Loop1{For Each<br/>Variable Pair}
+    Loop1 --> KB[Assemble Knowledge Bases]
+    
+    KB --> BG[Background KB:<br/>LLM Training Data]
+    KB --> RAG[Document KB:<br/>RAG Retrieval]
+    KB --> STAT[Statistical KB:<br/>Data Correlation]
+    
+    BG --> Vote1[Vote: +1, -1, or 0]
+    RAG --> Vote1
+    STAT --> Vote1
+    
+    Vote1 --> Score{Total Score<br/>≤ 0?}
+    Score -->|Yes| Remove[Remove Edge]
+    Score -->|No| Keep[Keep Edge]
+    
+    Remove --> Loop1
+    Keep --> Loop1
+    Loop1 -->|All Pairs<br/>Processed| Skeleton[Skeleton Graph<br/>Undirected]
+    
+    Skeleton --> Stage2[STAGE 2: Causal Orientation]
+    
+    Stage2 --> Loop2{For Each<br/>Edge in Skeleton}
+    Loop2 --> HC[Hill Climbing Search<br/>with BDeu Score]
+    
+    HC --> Prior[Apply Prior Weights<br/>from Stage 1]
+    Prior --> Bayes[Bayesian Posterior:<br/>P G|Data,LLM ∝<br/>P Data|G × P G|LLM]
+    
+    Bayes --> Direction{Select<br/>Direction}
+    Direction --> Orient[Orient Edge:<br/>A → B or B → A]
+    
+    Orient --> Loop2
+    Loop2 -->|All Edges<br/>Oriented| DAG[Causal DAG<br/>Directed Acyclic Graph]
+    
+    DAG --> Optional{Causal Inference<br/>Enabled?}
+    Optional -->|No| Filter
+    Optional -->|Yes| Stage3[STAGE 3: Causal Inference<br/>Optional]
+    
+    Stage3 --> FitCPD[Fit CPDs from Data<br/>Maximum Likelihood]
+    FitCPD --> BN[Bayesian Network<br/>Structure + Parameters]
+    
+    BN --> Effects[Estimate Causal Effects<br/>ATE for each cause]
+    Effects --> Queries[Enable Interventional<br/>Queries: P Y|do X ]
+    Queries --> Summary[Generate Causal<br/>Summary]
+    
+    Summary --> Filter
+    
+    Filter{Target Factor<br/>Specified?}
+    Filter -->|Yes| Degrees[Filter by Max Degrees<br/>of Separation]
+    Filter -->|No| Output
+    Degrees --> Output[Output Results]
+    
+    Output --> Viz[Interactive Visualization<br/>with Plotly]
+    Viz --> End([Return Causal Graph])
+    
+    style Stage1 fill:#e1f5ff,stroke:#01579b,stroke-width:3px
+    style Stage2 fill:#fff3e0,stroke:#e65100,stroke-width:3px
+    style Stage3 fill:#f3e5f5,stroke:#6a1b9a,stroke-width:3px
+    style BG fill:#c8e6c9,stroke:#2e7d32
+    style RAG fill:#c8e6c9,stroke:#2e7d32
+    style STAT fill:#c8e6c9,stroke:#2e7d32
+    style Skeleton fill:#ffccbc,stroke:#d84315,stroke-width:2px
+    style DAG fill:#ffccbc,stroke:#d84315,stroke-width:2px
+    style BN fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px
+    style HC fill:#fff9c4,stroke:#f57f17
+    style Bayes fill:#fff9c4,stroke:#f57f17
+    style Effects fill:#e1bee7,stroke:#6a1b9a
+    style Queries fill:#e1bee7,stroke:#6a1b9a
+```
 
-Causalif implements a three-stage algorithm:
+### Parallel Processing Flow
+
+```mermaid
+flowchart LR
+    subgraph Parallel["Parallel LLM Queries (up to 50 concurrent)"]
+        direction TB
+        P1[Pair 1: A-B] --> Q1[LLM Query 1]
+        P2[Pair 2: C-D] --> Q2[LLM Query 2]
+        P3[Pair 3: E-F] --> Q3[LLM Query 3]
+        PN[Pair N: X-Y] --> QN[LLM Query N]
+        
+        Q1 --> R1[Response 1]
+        Q2 --> R2[Response 2]
+        Q3 --> R3[Response 3]
+        QN --> RN[Response N]
+    end
+    
+    Input[Factor Pairs] --> Parallel
+    Parallel --> Aggregate[Aggregate Results]
+    Aggregate --> Continue[Continue Processing]
+    
+    style Parallel fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style Input fill:#bbdefb,stroke:#1976d2
+    style Aggregate fill:#fff9c4,stroke:#f57f17
+```
+
+Causalif implements a two-stage algorithm:
 
 ### Stage 1: Edge Existence Verification (Causalif 1)
 
@@ -348,7 +502,7 @@ set_causalif_engine(
         )
 
 # 4. Run causal analysis
-result = causalif.causalif("Why is interest_rate so low in week 3?")
+result = causalif_tool("Why is interest_rate so low in week 3?")
 
 # 5. Visualize results
 fig = visualize_causalif_results(result)
@@ -374,28 +528,28 @@ Allowed query formats (where <target_factor> is the variable to analyze):
 """
 
 # Format 1: Why questions
-result = causalif.causalif("Why is stress_level so high?")
-result = causalif.causalif("Why are sales so low?")
+result = causalif_tool("Why is stress_level so high?")
+result = causalif_tool("Why are sales so low?")
 
 # Format 2: What causes questions
-result = causalif.causalif("What causes low productivity?")
-result = causalif.causalif("What affects customer satisfaction?")
+result = causalif_tool("What causes low productivity?")
+result = causalif_tool("What affects customer satisfaction?")
 
 # Format 3: Direct statements
-result = causalif.causalif("productivity is too low")
-result = causalif.causalif("revenue is too high")
+result = causalif_tool("productivity is too low")
+result = causalif_tool("revenue is too high")
 
 # Format 4: Analysis requests
-result = causalif.causalif("analyze the causes of high stress_level")
-result = causalif.causalif("analyze the causes for poor performance")
+result = causalif_tool("analyze the causes of high stress_level")
+result = causalif_tool("analyze the causes for poor performance")
 
 # Format 5: Dependency queries
-result = causalif.causalif("dependencies of productivity")
-result = causalif.causalif("dependencies for stock_price")
+result = causalif_tool("dependencies of productivity")
+result = causalif_tool("dependencies for stock_price")
 
 # Format 6: Factor influence queries
-result = causalif.causalif("factors affecting sleep_hours")
-result = causalif.causalif("factors influencing market_volatility")
+result = causalif_tool("factors affecting sleep_hours")
+result = causalif_tool("factors influencing market_volatility")
 ```
 
 
