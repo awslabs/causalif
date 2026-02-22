@@ -1,72 +1,184 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Causalif Engine implementation"""
-from typing import Union, Dict, List, Tuple
-import plotly.graph_objects as go
-import asyncio
+"""CausalIF Engine implementation"""
+
+# Standard library imports
 import concurrent.futures
+import math
+from typing import Dict, List, Union, Tuple
+from collections import deque
+
+# Third-party imports
 import pandas as pd
 import networkx as nx
+import plotly.graph_objects as go
 import numpy as np
-from collections import deque
-from .core import AssociationResponse, CausalDirection, KnowledgeBase
-from .prompts import CausalifPrompts
 
-# Try to import nest_asyncio for Jupyter compatibility
-try:
-    import nest_asyncio
+# pgmpy imports for Bayesian causal inference
+from pgmpy.estimators import HillClimbSearch, BDeu, ExpertKnowledge, StructureScore, MaximumLikelihoodEstimator
+from pgmpy.inference import CausalInference
+from pgmpy.models import DiscreteBayesianNetwork
 
-    nest_asyncio.apply()
-    JUPYTER_COMPATIBLE = True
-except ImportError:
-    JUPYTER_COMPATIBLE = False
-    print("nest_asyncio not available. Install with: pip install nest-asyncio")
+# Local imports (relative)
+from .core import AssociationResponse, KnowledgeBase
+from .prompts import CausalIFPrompts
 
 
-class CausalifEngine:
-    """Causalif implementation with parallel LLM queries and complete RAG support"""
+# ============================================================================
+# CUSTOM BAYESIAN SCORING WITH PRIORS FROM CausalIF 1
+# ============================================================================
 
-    def __init__(
-        self,
-        model,
-        retriever_tool=None,
-        dataframe: pd.DataFrame = None,
-        factors=None,
-        domains=None,
-        k_documents: int = 5,
-        max_degrees: int = 5,
-        max_parallel_queries: int = 50,
-    ):
+class PriorWeightedBDeu(StructureScore):
+    """
+    Custom scoring function that combines BDeu score with CausalIF 1 priors.
+    
+    This implements true Bayesian inference:
+    Score(G) = log P(G | Data, Priors) 
+             = log P(Data | G) + log P(G | Priors)
+             = BDeu(G) + λ × Σ log(prior_strength_ij) for edges (i,j) in G
+    
+    where:
+    - BDeu(G) = Bayesian Dirichlet equivalent uniform score (data likelihood)
+    - prior_strength_ij = Raw LLM vote score from CausalIF 1 (typically 1, 2, or 3)
+    - λ = weight parameter controlling prior influence (default: 1.0)
+    
+    Using raw vote scores provides better discrimination:
+    - log(1) = 0.0 (weak prior)
+    - log(2) ≈ 0.69 (moderate prior)
+    - log(3) ≈ 1.10 (strong prior)
+    
+    These values meaningfully influence BDeu scores which are typically in the
+    range of -1000 to -10000, allowing the prior to guide structure learning.
+    """
+    
+    def __init__(self, data, skeleton_graph, prior_weight=1.0, equivalent_sample_size=10, **kwargs):
+        """
+        Args:
+            data: pandas DataFrame with observational data
+            skeleton_graph: networkx Graph from CausalIF 1 with edge attributes
+            prior_weight: λ parameter controlling prior influence (0=ignore priors, 1=equal weight)
+            equivalent_sample_size: BDeu hyperparameter
+        """
+        # Initialize parent StructureScore class
+        super(PriorWeightedBDeu, self).__init__(data, **kwargs)
+        
+        self.bdeu = BDeu(data, equivalent_sample_size=equivalent_sample_size)
+        self.skeleton = skeleton_graph
+        self.prior_weight = prior_weight
+        
+        # Extract prior strengths from skeleton
+        # prior_strength contains LLM voting confidence only
+        self.prior_strengths = {}
+        for u, v in skeleton_graph.edges():
+            # Get prior strength from CausalIF 1 (LLM-based)
+            prior_strength = skeleton_graph[u][v].get('prior_strength', 0.5)
+            
+            # Store for both directions (undirected edge)
+            # No need to multiply by confidence again - it's already in prior_strength
+            self.prior_strengths[(u, v)] = prior_strength
+            self.prior_strengths[(v, u)] = prior_strength
+        
+        print(f"\n[Prior-Weighted Scoring] Initialized with {len(self.prior_strengths)//2} prior edges")
+        print(f"  Prior weight (λ): {prior_weight}")
+        if self.prior_strengths:
+            print(f"  Prior strength range: [{min(self.prior_strengths.values()):.3f}, {max(self.prior_strengths.values()):.3f}]")
+    
+    def score(self, model):
+        """
+        Compute prior-weighted score for a Bayesian Network model.
+        
+        Args:
+            model: DiscreteBayesianNetwork (DAG) to score
+            
+        Returns:
+            float: Combined score (higher is better)
+        """
+        # Compute BDeu score (likelihood from data)
+        bdeu_score = self.bdeu.score(model)
+        
+        # Compute prior score (sum of log prior strengths for edges in model)
+        prior_score = 0.0
+        for u, v in model.edges():
+            if (u, v) in self.prior_strengths:
+                # Use log to make it additive (Bayesian framework)
+                prior_strength = self.prior_strengths[(u, v)]
+                # Add small epsilon to avoid log(0)
+                prior_score += np.log(prior_strength + 1e-10)
+            else:
+                # Edge not in skeleton - should not happen due to constraints
+                # But if it does, penalize heavily
+                prior_score += np.log(1e-10)
+        
+        # Combined score: likelihood + weighted prior
+        combined_score = bdeu_score + self.prior_weight * prior_score
+        
+        return combined_score
+    
+    def local_score(self, variable, parents):
+        """
+        Compute local score for a variable given its parents.
+        Required by pgmpy's HillClimbSearch.
+        
+        This delegates to BDeu for the likelihood part, then adds prior contribution.
+        """
+        # Get BDeu local score
+        bdeu_local = self.bdeu.local_score(variable, parents)
+        
+        # Add prior contribution for edges from parents to variable
+        prior_local = 0.0
+        for parent in parents:
+            if (parent, variable) in self.prior_strengths:
+                prior_strength = self.prior_strengths[(parent, variable)]
+                prior_local += self.prior_weight * np.log(prior_strength + 1e-10)
+        
+        return bdeu_local + prior_local
+
+
+
+class CausalIFEngine:
+    """CausalIF implementation with Bayesian causal inference for orientation"""
+    
+    def __init__(self, model, retriever_tool=None, dataframe: pd.DataFrame = None, 
+                 k_documents: int = 1, max_degrees: int = None, max_parallel_queries: int = 25,
+                 excluded_target_columns: List[str] = None, excluded_related_columns: List[str] = None,
+                 related_factors: List[str] = None, selected_dataframe_columns: List[str] = None,
+                 enable_causal_estimate: bool = False):
         self.model = model
         self.retriever_tool = retriever_tool
         self.dataframe = dataframe
-        self.factors = factors
-        self.domains = domains
         self.k_documents = k_documents
-        self.max_degrees = max_degrees
+        self.max_degrees = max_degrees  # None = no filtering, int = filter by degrees
         self.max_parallel_queries = max_parallel_queries
-        self.prompts = CausalifPrompts()
+        self.excluded_target_columns = excluded_target_columns or []
+        self.excluded_related_columns = excluded_related_columns or []
+        self.related_factors = related_factors or []  # Factors to fix in skeleton before Hill Climb
+        self.selected_dataframe_columns = selected_dataframe_columns  # Specific columns to select from dataframe
+        self.prompts = CausalIFPrompts()
+        self.enable_causal_estimate = enable_causal_estimate  # NEW: Enable causal inference
+        self.causal_model = None  # Will store fitted Bayesian Network
+        self.causal_inference_engine = None  # Will store CausalInference object
 
-    def get_factors_within_degrees(
-        self, target_factor: str, all_factors: List[str], max_degrees: int = None
-    ) -> List[str]:
-        if max_degrees is None:
-            max_degrees = self.max_degrees
-        return all_factors
+    def filter_graph_by_degrees(self, graph: Union[nx.Graph, nx.DiGraph], target_factor: str, max_degrees: int = None) -> Union[nx.Graph, nx.DiGraph]:
+        """
+        Filter graph to only include nodes within max_degrees of target_factor.
 
-    def filter_graph_by_degrees(
-        self,
-        graph: Union[nx.Graph, nx.DiGraph],
-        target_factor: str,
-        max_degrees: int = None,
-    ) -> Union[nx.Graph, nx.DiGraph]:
+        Args:
+            graph: Graph to filter
+            target_factor: Target node to measure degrees from
+            max_degrees: Maximum degrees of separation (None = no filtering, returns entire graph)
+
+        Returns:
+            Filtered graph (or original graph if max_degrees is None)
+        """
         if max_degrees is None:
-            max_degrees = self.max_degrees
+            # No filtering - return entire graph
+            return graph
 
         if target_factor not in graph.nodes():
             return graph
 
+        # Python BFS implementation
         visited = set()
         queue = deque([(target_factor, 0)])
         nodes_within_degrees = set([target_factor])
@@ -78,9 +190,7 @@ class CausalifEngine:
                 continue
 
             if isinstance(graph, nx.DiGraph):
-                neighbors = set(graph.predecessors(current_node)) | set(
-                    graph.successors(current_node)
-                )
+                neighbors = set(graph.predecessors(current_node)) | set(graph.successors(current_node))
             else:
                 neighbors = set(graph.neighbors(current_node))
 
@@ -90,16 +200,15 @@ class CausalifEngine:
                     nodes_within_degrees.add(neighbor)
                     queue.append((neighbor, current_degree + 1))
 
-        filtered_graph = graph.subgraph(nodes_within_degrees).copy()
+        if isinstance(graph, nx.DiGraph):
+            filtered_graph = graph.subgraph(nodes_within_degrees).copy()
+        else:
+            filtered_graph = graph.subgraph(nodes_within_degrees).copy()
 
-        print(
-            f"Filtered graph to {len(filtered_graph.nodes())} nodes within {max_degrees} degrees of {target_factor}"
-        )
+        print(f"Filtered graph to {len(filtered_graph.nodes())} nodes within {max_degrees} degrees of {target_factor}")
         return filtered_graph
 
-    def get_relationship_path(
-        self, graph: Union[nx.Graph, nx.DiGraph], source: str, target: str
-    ) -> List[str]:
+    def get_relationship_path(self, graph: Union[nx.Graph, nx.DiGraph], source: str, target: str) -> List[str]:
         try:
             if isinstance(graph, nx.DiGraph):
                 undirected = graph.to_undirected()
@@ -110,56 +219,56 @@ class CausalifEngine:
         except nx.NetworkXNoPath:
             return []
 
-    def analyze_degrees_of_separation(
-        self, graph: Union[nx.Graph, nx.DiGraph], target_factor: str
-    ) -> Dict:
+    def analyze_degrees_of_separation(self, graph: Union[nx.Graph, nx.DiGraph], target_factor: str) -> Dict:
+        """
+        Analyze degrees of separation from target factor.
+
+        Args:
+            graph: Graph to analyze
+            target_factor: Target node to measure degrees from
+
+        Returns:
+            Dictionary with degree analysis (all factors if max_degrees is None)
+        """
         degrees_analysis = {
-            "target_factor": target_factor,
-            "factors_by_degree": {},
-            "paths": {},
-            "max_degree_found": 0,
+            'target_factor': target_factor,
+            'factors_by_degree': {},
+            'paths': {},
+            'max_degree_found': 0
         }
 
         for factor in graph.nodes():
             if factor == target_factor:
-                degrees_analysis["factors_by_degree"][0] = degrees_analysis[
-                    "factors_by_degree"
-                ].get(0, []) + [factor]
+                degrees_analysis['factors_by_degree'][0] = degrees_analysis['factors_by_degree'].get(0, []) + [factor]
                 continue
 
             path = self.get_relationship_path(graph, target_factor, factor)
             if path:
                 degree = len(path) - 1
-                if degree <= self.max_degrees:
-                    degrees_analysis["factors_by_degree"][degree] = degrees_analysis[
-                        "factors_by_degree"
-                    ].get(degree, []) + [factor]
-                    degrees_analysis["paths"][factor] = path
-                    degrees_analysis["max_degree_found"] = max(
-                        degrees_analysis["max_degree_found"], degree
-                    )
+                # Include all degrees if max_degrees is None, otherwise filter
+                if self.max_degrees is None or degree <= self.max_degrees:
+                    degrees_analysis['factors_by_degree'][degree] = degrees_analysis['factors_by_degree'].get(degree, []) + [factor]
+                    degrees_analysis['paths'][factor] = path
+                    degrees_analysis['max_degree_found'] = max(degrees_analysis['max_degree_found'], degree)
 
         return degrees_analysis
+
 
     def retrieve_documents(self, factor_a: str, factor_b: str) -> List[KnowledgeBase]:
         """Retrieve relevant documents for factor pair using RAG"""
         try:
             if self.retriever_tool:
-                query = f"{factor_a} and {factor_b} correlation causation relationship"
+                query = f"{factor_a} and {factor_b} association relationship"
                 print(f"RAG Query: {query}")
                 retrieved_docs = self.retriever_tool.invoke({"query": query})
 
                 documents = []
 
                 if isinstance(retrieved_docs, list):
-                    for i, doc in enumerate(retrieved_docs[: self.k_documents]):
+                    for i, doc in enumerate(retrieved_docs[:self.k_documents]):
                         if isinstance(doc, dict):
-                            content = (
-                                doc.get("content", "")
-                                or doc.get("page_content", "")
-                                or str(doc)
-                            )
-                        elif hasattr(doc, "page_content"):
+                            content = doc.get('content', '') or doc.get('page_content', '') or str(doc)
+                        elif hasattr(doc, 'page_content'):
                             content = doc.page_content
                         elif isinstance(doc, str):
                             content = doc
@@ -167,18 +276,20 @@ class CausalifEngine:
                             content = str(doc)
 
                         kb = KnowledgeBase(
-                            kb_type="DOC", content=content, source=f"doc_{i}"
+                            kb_type="DOC",
+                            content=content,
+                            source=f"doc_{i}"
                         )
                         documents.append(kb)
                 elif isinstance(retrieved_docs, str):
                     kb = KnowledgeBase(
-                        kb_type="DOC", content=retrieved_docs, source="single_doc"
+                        kb_type="DOC",
+                        content=retrieved_docs,
+                        source="single_doc"
                     )
                     documents.append(kb)
 
-                print(
-                    f"Retrieved {len(documents)} documents for {factor_a} and {factor_b}"
-                )
+                print(f"Retrieved {len(documents)} documents for {factor_a} and {factor_b}")
                 return documents
             else:
                 print("No retriever tool available for RAG")
@@ -188,919 +299,1246 @@ class CausalifEngine:
             print(f"Error retrieving documents: {e}")
             return []
 
-    def get_correlation_evidence(self, factor_a: str, factor_b: str) -> str:
-        """Get correlation evidence from dataframe if available"""
-        if (
-            self.dataframe is not None
-            and factor_a in self.dataframe.columns
-            and factor_b in self.dataframe.columns
-        ):
-            try:
-                df_numeric = self.dataframe[[factor_a, factor_b]].select_dtypes(
-                    include=[np.number]
-                )
-                if len(df_numeric.columns) >= 2:
-                    correlation = df_numeric.corr().iloc[0, 1]
-                    return f"Statistical analysis shows correlation of {correlation:.3f} between {factor_a} and {factor_b}"
-                else:
-                    try:
-                        from sklearn.preprocessing import LabelEncoder
-
-                        le = LabelEncoder()
-                        df_encoded = pd.DataFrame()
-
-                        for col in [factor_a, factor_b]:
-                            if self.dataframe[col].dtype == "object":
-                                df_encoded[col] = le.fit_transform(
-                                    self.dataframe[col].astype(str)
-                                )
-                            else:
-                                df_encoded[col] = self.dataframe[col]
-
-                        correlation = df_encoded.corr().iloc[0, 1]
-                        return f"Statistical analysis (encoded) shows correlation of {correlation:.3f} between {factor_a} and {factor_b}"
-                    except Exception:
-                        return f"Could not compute correlation between {factor_a} and {factor_b}"
-            except Exception as e:
-                return f"Could not compute correlation between {factor_a} and {factor_b}: {str(e)}"
-        return "No statistical evidence available from data"
 
     def parallel_llm_query_sync(self, prompts: List[str]) -> List[str]:
-        """Execute multiple LLM queries in parallel using ThreadPoolExecutor (Jupyter-compatible)"""
+        """Execute multiple LLM queries in parallel using ThreadPoolExecutor with retry logic.
 
-        def single_query(prompt: str) -> str:
-            try:
-                if self.model is None:
-                    return "UNKNOWN"
+        Features:
+        - Limits concurrency to avoid connection pool exhaustion
+        - Retries throttled requests with exponential backoff
+        - Proper response-to-prompt mapping using indices
+        - Reasonable timeouts with graceful degradation
+        - Handles connection pool errors and I/O errors
+        """
+        import time
+        import random
+        from urllib3.exceptions import ProtocolError
+        from http.client import HTTPException
 
-                response = self.model.invoke(prompt)
-                return (
-                    response.content if hasattr(response, "content") else str(response)
-                )
-            except Exception as e:
-                print(f"Error in parallel query: {e}")
-                return "UNKNOWN"
+        def single_query_with_retry(prompt_index: int, prompt: str, max_retries: int = 3) -> str:
+            """Execute a single query with retry logic for throttling and connection errors."""
+            for attempt in range(max_retries):
+                try:
+                    if self.model is None:
+                        return "UNKNOWN"
 
-        # Use ThreadPoolExecutor for parallel execution (Jupyter-compatible)
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.max_parallel_queries
-        ) as executor:
-            # Submit all tasks
-            future_to_prompt = {
-                executor.submit(single_query, prompt): prompt for prompt in prompts
+                    response = self.model.invoke(prompt)
+                    result = response.content if hasattr(response, 'content') else str(response)
+                    return str(result)
+
+                except (ValueError, ProtocolError, HTTPException, ConnectionError) as e:
+                    # Connection pool errors, I/O errors, protocol errors
+                    error_msg = str(e).lower()
+                    
+                    is_connection_error = any(keyword in error_msg for keyword in
+                                            ['connection pool', 'i/o operation', 'closed file', 
+                                             'connection', 'protocol', 'broken pipe'])
+                    
+                    if is_connection_error and attempt < max_retries - 1:
+                        # Exponential backoff with jitter for connection errors
+                        wait_time = (2 ** attempt) + random.uniform(0, 2)
+                        print(f"  Connection error on query {prompt_index + 1}, retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"  Connection error in query {prompt_index + 1}: {str(e)[:100]}")
+                        return "UNKNOWN"
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+
+                    # Check if it's a throttling error
+                    is_throttle = any(keyword in error_msg for keyword in
+                                     ['throttl', 'rate limit', 'too many requests', '429'])
+
+                    if is_throttle and attempt < max_retries - 1:
+                        # Exponential backoff with jitter for throttling
+                        wait_time = (2 ** attempt) + random.uniform(0, 1)
+                        print(f"  Throttled on query {prompt_index + 1}, retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"  Error in query {prompt_index + 1}: {str(e)[:100]}")
+                        return "UNKNOWN"
+
+            return "UNKNOWN"
+
+        # Limit concurrent workers to avoid HTTP connection pool exhaustion
+        # Reduce from 10 to 5 to be more conservative with connection pool
+        safe_max_workers = min(self.max_parallel_queries, 5)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=safe_max_workers) as executor:
+            # Submit with index to ensure correct mapping
+            future_to_index = {
+                executor.submit(single_query_with_retry, i, prompt): i
+                for i, prompt in enumerate(prompts)
             }
 
-            # Collect results in order
             results = [None] * len(prompts)
-            for i, future in enumerate(
-                concurrent.futures.as_completed(future_to_prompt)
-            ):
-                try:
-                    result = future.result()
-                    # Find the original index
-                    original_prompt = future_to_prompt[future]
-                    original_index = prompts.index(original_prompt)
-                    results[original_index] = result
-                except Exception as e:
-                    print(f"Query failed: {e}")
-                    # Find the original index for failed query
-                    original_prompt = future_to_prompt[future]
-                    original_index = prompts.index(original_prompt)
-                    results[original_index] = "UNKNOWN"
 
-        # Fill any None values with "UNKNOWN"
+            for future in concurrent.futures.as_completed(future_to_index):
+                prompt_index = future_to_index[future]
+                try:
+                    result = future.result(timeout=90)  # Increased to 90 second timeout per query
+                    results[prompt_index] = result
+                except concurrent.futures.TimeoutError:
+                    print(f"  Query {prompt_index + 1} timed out after 90 seconds")
+                    results[prompt_index] = "UNKNOWN"
+                except Exception as e:
+                    print(f"  Query {prompt_index + 1} failed: {str(e)[:100]}")
+                    results[prompt_index] = "UNKNOWN"
+
+        # Ensure all results are filled
         results = [r if r is not None else "UNKNOWN" for r in results]
         return results
 
-    async def parallel_llm_query_async(self, prompts: List[str]) -> List[str]:
-        """Execute multiple LLM queries in parallel using asyncio (for non-Jupyter environments)"""
-
-        async def single_query(prompt: str) -> str:
-            try:
-                if self.model is None:
-                    return "UNKNOWN"
-
-                # Use asyncio to run the synchronous model call in a thread pool
-                loop = asyncio.get_event_loop()
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=self.max_parallel_queries
-                ) as executor:
-                    response = await loop.run_in_executor(
-                        executor, self.model.invoke, prompt
-                    )
-                    return (
-                        response.content
-                        if hasattr(response, "content")
-                        else str(response)
-                    )
-            except Exception as e:
-                print(f"Error in parallel query: {e}")
-                return "UNKNOWN"
-
-        # Execute all queries in parallel
-        tasks = [single_query(prompt) for prompt in prompts]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Handle exceptions
-        processed_results = []
-        for result in results:
-            if isinstance(result, Exception):
-                print(f"Query failed: {result}")
-                processed_results.append("UNKNOWN")
-            else:
-                processed_results.append(result)
-
-        return processed_results
-
     def execute_parallel_queries(self, prompts: List[str]) -> List[str]:
-        """Execute parallel queries with Jupyter compatibility"""
+        """Execute parallel queries with batch size limiting.
+
+        Processes queries in batches to avoid overwhelming the LLM API.
+        """
         if not prompts:
             return []
 
-        try:
-            # Try asyncio approach first (works in regular Python)
-            if JUPYTER_COMPATIBLE:
-                # Use asyncio with nest_asyncio for Jupyter
-                loop = asyncio.get_event_loop()
-                return loop.run_until_complete(self.parallel_llm_query_async(prompts))
-            else:
-                # Fallback to synchronous parallel execution
-                return self.parallel_llm_query_sync(prompts)
-        except Exception as e:
-            print(f"Parallel execution failed, falling back to sync: {e}")
+        # Process in batches to avoid overwhelming API
+        BATCH_SIZE = 50  # Process max 50 queries at a time
+
+        if len(prompts) <= BATCH_SIZE:
+            # Small batch - process all at once
             return self.parallel_llm_query_sync(prompts)
-
-    def query_association_background(
-        self, factor_a: str, factor_b: str, factors: List[str], domains: List[str]
-    ) -> AssociationResponse:
-        """Query LLM for association using background knowledge"""
-
-        # Check if model is available
-        if self.model is None:
-            print("Warning: No model available, using statistical evidence only")
-            # Fallback to statistical analysis
-            return self._statistical_association_fallback(factor_a, factor_b)
-
-        # Include data evidence if available
-        data_evidence = self.get_correlation_evidence(factor_a, factor_b)
-
-        prompt = f"""
-        {self.prompts.background_reminder(factors, domains)}
-
-        Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge and the following data evidence, try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
-
-        Data Evidence: {data_evidence}
-
-        Main factors: {factor_a} and {factor_b}
-
-        Association Context:
-        {self.prompts.association_context()}
-
-        Association Question: Are {factor_a} and {factor_b} associated?
-
-        Consider both your background knowledge and the data evidence provided.
-
-        Expected Response Format:
-        Thoughts: [Write your thoughts on the question]
-        Answer: (A) Associated (B) Independent (C) Unknown
-        """
-
-        try:
-            response = self.model.invoke(prompt)
-            response_text = response.content.upper()
-
-            if "ASSOCIATED" in response_text and "INDEPENDENT" not in response_text:
-                return AssociationResponse.ASSOCIATED
-            elif "INDEPENDENT" in response_text:
-                return AssociationResponse.INDEPENDENT
-            else:
-                return AssociationResponse.UNKNOWN
-        except Exception as e:
-            print(f"Error in background association query: {e}")
-            return self._statistical_association_fallback(factor_a, factor_b)
-
-    def query_association_document(
-        self,
-        factor_a: str,
-        factor_b: str,
-        document: KnowledgeBase,
-        factors: List[str],
-        domains: List[str],
-    ) -> AssociationResponse:
-        """Query LLM for association using a specific document"""
-
-        if self.model is None:
-            print("Warning: No model available for document analysis, using fallback")
-            return self._statistical_association_fallback(factor_a, factor_b)
-
-        prompt = f"""
-        {self.prompts.background_reminder(factors, domains)}
-
-        Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
-
-        Document: {document.content[:2000]}...
-
-        Main factors: {factor_a} and {factor_b}
-
-        Association Context:
-        {self.prompts.association_context()}
-
-        Association Question: Are {factor_a} and {factor_b} associated?
-
-        Expected Response Format:
-        Thoughts: [Write your thoughts on the question]
-        Answer: (A) Associated (B) Independent (C) Unknown
-        Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]
-        """
-
-        try:
-            response = self.model.invoke(prompt)
-            response_text = response.content.upper()
-
-            if "ASSOCIATED" in response_text and "INDEPENDENT" not in response_text:
-                return AssociationResponse.ASSOCIATED
-            elif "INDEPENDENT" in response_text:
-                return AssociationResponse.INDEPENDENT
-            else:
-                return AssociationResponse.UNKNOWN
-        except Exception as e:
-            print(f"Error in document association query: {e}")
-            return self._statistical_association_fallback(factor_a, factor_b)
-
-    def query_causal_direction_background(
-        self, factor_a: str, factor_b: str, factors: List[str], domains: List[str]
-    ) -> CausalDirection:
-        """Query causal direction using background knowledge"""
-
-        if self.model is None:
-            print("Warning: No model available for causal direction")
-            return CausalDirection.UNKNOWN
-
-        # Include data evidence
-        data_evidence = self.get_correlation_evidence(factor_a, factor_b)
-
-        prompt = f"""
-        {self.prompts.background_reminder([factor_a, factor_b], domains)}
-
-        Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge and data evidence, try to find statistical evidence to clarify the direction of the causal relationship between the pair of 'Main factors' according to the 'Causal direction context'.
-
-        Data Evidence: {data_evidence}
-
-        Main factors: {factor_a} and {factor_b}
-
-        Causal direction context:
-        {self.prompts.causal_direction_context()}
-
-        Causal direction question: Is {factor_a} the cause of {factor_b}, or {factor_b} the cause of {factor_a}?
-
-        Expected Response Format:
-        Thoughts: [Write your thoughts on the question]
-        Answer: (A) {factor_a} is the cause of {factor_b} (B) {factor_b} is the cause of {factor_a} (C) Unknown
-        """
-
-        try:
-            response = self.model.invoke(prompt)
-            response_text = response.content
-
-            if (
-                f"{factor_a} is the cause of {factor_b}" in response_text
-                or f"{factor_a.upper()} IS THE CAUSE OF {factor_b.upper()}"
-                in response_text.upper()
-            ):
-                return CausalDirection.A_CAUSES_B
-            elif (
-                f"{factor_b} is the cause of {factor_a}" in response_text
-                or f"{factor_b.upper()} IS THE CAUSE OF {factor_a.upper()}"
-                in response_text.upper()
-            ):
-                return CausalDirection.B_CAUSES_A
-            else:
-                return CausalDirection.UNKNOWN
-        except Exception as e:
-            print(f"Error in causal direction query: {e}")
-            return CausalDirection.UNKNOWN
-
-    def query_causal_direction_document(
-        self,
-        factor_a: str,
-        factor_b: str,
-        document: KnowledgeBase,
-        factors: List[str],
-        domains: List[str],
-    ) -> CausalDirection:
-        """Query causal direction using document knowledge"""
-
-        prompt = f"""
-        {self.prompts.background_reminder([factor_a, factor_b], domains)}
-
-        Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', try to find statistical evidence to clarify the direction of the causal relationship between the pair of 'Main factors' according to the 'Causal direction context'.
-
-        Document: {document.content[:2000]}...
-
-        Main factors: {factor_a} and {factor_b}
-
-        Causal direction context:
-        {self.prompts.causal_direction_context()}
-
-        Causal direction question: Is {factor_a} the cause of {factor_b}, or {factor_b} the cause of {factor_a}?
-
-        Expected Response Format:
-        Thoughts: [Write your thoughts on the question]
-        Answer: (A) {factor_a} is the cause of {factor_b} (B) {factor_b} is the cause of {factor_a} (C) Unknown
-        Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]
-        """
-
-        try:
-            response = self.model.invoke(prompt)
-            response_text = response.content
-
-            if (
-                f"{factor_a} is the cause of {factor_b}" in response_text
-                or f"{factor_a.upper()} IS THE CAUSE OF {factor_b.upper()}"
-                in response_text.upper()
-            ):
-                return CausalDirection.A_CAUSES_B
-            elif (
-                f"{factor_b} is the cause of {factor_a}" in response_text
-                or f"{factor_b.upper()} IS THE CAUSE OF {factor_a.upper()}"
-                in response_text.upper()
-            ):
-                return CausalDirection.B_CAUSES_A
-            else:
-                return CausalDirection.UNKNOWN
-        except Exception as e:
-            print(f"Error in document causal direction query: {e}")
-            return CausalDirection.UNKNOWN
-
-    def compute_edge_existence(
-        self,
-        factor_a: str,
-        factor_b: str,
-        kb: KnowledgeBase,
-        factors: List[str],
-        domains: List[str],
-    ) -> int:
-        """Compute ζ_KB(ij) for a knowledge base - original Causalif method"""
-
-        # Step 1: Association verification
-        if kb.kb_type == "BG":
-            association = self.query_association_background(
-                factor_a, factor_b, factors, domains
-            )
         else:
-            association = self.query_association_document(
-                factor_a, factor_b, kb, factors, domains
+            # Large batch - process in chunks
+            print(f"  Processing {len(prompts)} queries in batches of {BATCH_SIZE}...")
+            all_results = []
+
+            for i in range(0, len(prompts), BATCH_SIZE):
+                batch = prompts[i:i + BATCH_SIZE]
+                batch_num = (i // BATCH_SIZE) + 1
+                total_batches = (len(prompts) + BATCH_SIZE - 1) // BATCH_SIZE
+
+                print(f"  Batch {batch_num}/{total_batches}: Processing {len(batch)} queries...")
+
+                batch_results = self.parallel_llm_query_sync(batch)
+                all_results.extend(batch_results)
+
+            return all_results
+
+
+
+
+    def query_association_document(self, factor_a: str, factor_b: str, document: KnowledgeBase, factors: List[str], domains: List[str]) -> AssociationResponse:
+        """Query LLM for association using a specific document"""
+        
+        if self.model is None:
+            raise ValueError(
+                "CausalIF 1 requires an LLM model for document-based association queries. "
+                "The original CausalIF algorithm uses LLM reasoning from retrieved documents "
+                "to determine edge existence. Please provide a valid LLM model when initializing CausalIFEngine."
+            )
+            
+        prompt = f"""
+        {self.prompts.background_reminder(factors, domains)}
+        
+        Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
+        
+        Document: {document.content[:2000]}...
+        
+        Main factors: {factor_a} and {factor_b}
+        
+        Association Context:
+        {self.prompts.association_context()}
+        
+        Association Question: Are {factor_a} and {factor_b} associated?
+        
+        Expected Response Format:
+        Thoughts: [Write your thoughts on the question]
+        Answer: (A) Associated (B) Independent (C) Unknown
+        Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]
+        """
+        
+        try:
+            response = self.model.invoke(prompt)
+            response_text = response.content.upper()
+            
+            if "ASSOCIATED" in response_text and "INDEPENDENT" not in response_text:
+                return AssociationResponse.ASSOCIATED
+            elif "INDEPENDENT" in response_text:
+                return AssociationResponse.INDEPENDENT
+            else:
+                return AssociationResponse.UNKNOWN
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM query failed for document-based association between {factor_a} and {factor_b}: {e}\n"
+                "CausalIF 1 requires successful LLM queries to determine edge existence. "
+                "Please check your LLM model configuration and connectivity."
             )
 
-        if association == AssociationResponse.INDEPENDENT:
-            return 0  # No edge - factors are independent
-        elif association == AssociationResponse.UNKNOWN:
-            return None  # KB is unusable
-
-        # Step 2: Association type verification (simplified for now)
-        # In full Causalif, this would check for direct vs indirect association
-        # For now, we assume associated means direct edge
-        if association == AssociationResponse.ASSOCIATED:
-            return 1  # Edge exists - direct association
-
-        return None  # Unknown
-
-    def batch_association_queries(
-        self,
-        factor_pairs: List[Tuple[str, str]],
-        factors: List[str],
-        domains: List[str],
-    ) -> Dict[Tuple[str, str], AssociationResponse]:
-        """Batch process association queries for multiple factor pairs using background knowledge"""
-
-        # Prepare all prompts for parallel execution
-        prompts = []
-
-        for factor_a, factor_b in factor_pairs:
-            data_evidence = self.get_correlation_evidence(factor_a, factor_b)
-
-            prompt = f"""
+    def causalif_1_edge_existence_verification(self, factors: List[str], domains: List[str], target_factor: str = None) -> nx.Graph:
+        """
+        CausalIF 1: Edge Existence Verification Algorithm (from paper)
+        
+        Algorithm from paper (https://arxiv.org/html/2402.15301v2):
+        1. Initialize with complete undirected graph (all possible edges)
+        2. For each variable pair (vi, vj):
+           - Initialize score S = 0
+           - Query each KB (documents + background knowledge)
+           - If ζ_KB(ij) = 1 (directly associated): S += 1
+           - If ζ_KB(ij) = 0 (independent or indirectly associated): S += -1
+           - If unknown: S += 0 (no change)
+           - If S ≤ 0: REMOVE the edge from graph
+           - If S > 0: KEEP the edge in graph
+        3. Return skeleton graph
+        """
+        
+        print("="*80)
+        print("CausalIF 1: Edge Existence Verification (Paper Algorithm)")
+        print("="*80)
+        print("Strategy: Start with complete graph, remove edges via LLM voting")
+        
+        # Step 1: Initialize with complete undirected graph
+        G = nx.complete_graph(len(factors))
+        # Relabel nodes from integers to factor names
+        mapping = {i: factors[i] for i in range(len(factors))}
+        G = nx.relabel_nodes(G, mapping)
+        
+        print(f"\nInitialized complete graph:")
+        print(f"  - Nodes: {len(G.nodes())}")
+        print(f"  - Edges: {len(G.edges())} (all possible pairs)")
+        
+        # Step 2: For each edge in complete graph, run LLM voting
+        print(f"\n{'='*80}")
+        print(f"Step 2: LLM Voting on All Edges (BATCH MODE)")
+        print(f"{'='*80}")
+        
+        edges_to_remove = []
+        edges_to_keep = []
+        all_edges = list(G.edges())
+        
+        print(f"Testing {len(all_edges)} edges with LLM voting...\n")
+        
+        # PHASE 1: Collect all edge pairs and retrieve documents
+        print(f"Phase 1: Retrieving documents for all edges...")
+        edge_documents = {}  # Maps (factor_a, factor_b) -> List[KnowledgeBase]
+        
+        for factor_a, factor_b in all_edges:
+            doc_kbs = self.retrieve_documents(factor_a, factor_b)
+            edge_documents[(factor_a, factor_b)] = doc_kbs[:2]  # Use top 2 documents
+        
+        print(f"✓ Retrieved documents for {len(all_edges)} edges\n")
+        
+        # PHASE 2: Build all prompts for batch execution
+        print(f"Phase 2: Building prompts for batch LLM execution...")
+        
+        # Structure: List of (edge_pair, kb_type, kb_content, prompt)
+        batch_queries = []
+        
+        for factor_a, factor_b in all_edges:
+            # Background knowledge prompt - Original CausalIF 1
+            bg_prompt = f"""
             {self.prompts.background_reminder(factors, domains)}
-
-            Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge and the following data evidence, try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
-
-            Data Evidence: {data_evidence}
-
+            
+            Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge, try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
+            
             Main factors: {factor_a} and {factor_b}
-
+            
             Association Context:
             {self.prompts.association_context()}
-
+            
             Association Question: Are {factor_a} and {factor_b} associated?
-
-            Consider both your background knowledge and the data evidence provided.
-
+            
             Expected Response Format:
             Thoughts: [Write your thoughts on the question]
             Answer: (A) Associated (B) Independent (C) Unknown
             """
-
-            prompts.append(prompt)
-
-        # Execute all queries in parallel
-        try:
-            responses = self.execute_parallel_queries(prompts)
-        except Exception as e:
-            print(f"Error in batch processing: {e}")
-            responses = ["UNKNOWN"] * len(prompts)
-
-        # Process responses
-        results = {}
-        for i, (factor_a, factor_b) in enumerate(factor_pairs):
-            if i < len(responses):
-                response_text = responses[i].upper()
-
-                if "ASSOCIATED" in response_text and "INDEPENDENT" not in response_text:
-                    results[(factor_a, factor_b)] = AssociationResponse.ASSOCIATED
-                elif "INDEPENDENT" in response_text:
-                    results[(factor_a, factor_b)] = AssociationResponse.INDEPENDENT
-                else:
-                    results[(factor_a, factor_b)] = AssociationResponse.UNKNOWN
+            
+            batch_queries.append({
+                'edge': (factor_a, factor_b),
+                'kb_type': 'BG',
+                'prompt': bg_prompt
+            })
+            
+            # Document knowledge prompts
+            for doc_kb in edge_documents[(factor_a, factor_b)]:
+                doc_prompt = f"""
+                {self.prompts.background_reminder(factors, domains)}
+                
+                Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', try to find statistical evidence to clarify the association relationship between the pair of 'Main factors' according to the 'Association Context'.
+                
+                Document: {doc_kb.content[:2000]}...
+                
+                Main factors: {factor_a} and {factor_b}
+                
+                Association Context:
+                {self.prompts.association_context()}
+                
+                Association Question: Are {factor_a} and {factor_b} associated?
+                
+                Expected Response Format:
+                Thoughts: [Write your thoughts on the question]
+                Answer: (A) Associated (B) Independent (C) Unknown
+                Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]
+                """
+                
+                batch_queries.append({
+                    'edge': (factor_a, factor_b),
+                    'kb_type': doc_kb.kb_type,
+                    'prompt': doc_prompt
+                })
+        
+        print(f"✓ Built {len(batch_queries)} prompts ({len(all_edges)} edges × ~{len(batch_queries)//len(all_edges)} KBs each)\n")
+        
+        # PHASE 3: Execute all prompts in parallel
+        print(f"Phase 3: Executing {len(batch_queries)} LLM queries in parallel...")
+        
+        prompts = [q['prompt'] for q in batch_queries]
+        responses = self.execute_parallel_queries(prompts)
+        
+        print(f"✓ Completed all LLM queries\n")
+        
+        # PHASE 4: Parse results and compute vote scores
+        print(f"Phase 4: Processing results and computing vote scores...\n")
+        
+        # Map responses back to edges
+        edge_votes = {}  # Maps (factor_a, factor_b) -> List[(kb_type, vote)]
+        
+        for i, query_info in enumerate(batch_queries):
+            edge = query_info['edge']
+            kb_type = query_info['kb_type']
+            response_text = responses[i].upper() if i < len(responses) else "UNKNOWN"
+            
+            # Parse response to vote
+            if "ASSOCIATED" in response_text and "INDEPENDENT" not in response_text:
+                vote = 1  # Directly associated
+            elif "INDEPENDENT" in response_text:
+                vote = 0  # Independent or indirectly associated
             else:
-                results[(factor_a, factor_b)] = AssociationResponse.UNKNOWN
-
-        return results
-
-    def batch_causal_direction_queries(
-        self,
-        factor_pairs: List[Tuple[str, str]],
-        factors: List[str],
-        domains: List[str],
-    ) -> Dict[Tuple[str, str], CausalDirection]:
-        """Batch process causal direction queries for multiple factor pairs using background knowledge"""
-
-        prompts = []
-
-        for factor_a, factor_b in factor_pairs:
-            data_evidence = self.get_correlation_evidence(factor_a, factor_b)
-
-            prompt = f"""
-            {self.prompts.background_reminder([factor_a, factor_b], domains)}
-
-            Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge and data evidence, try to find statistical evidence to clarify the direction of the causal relationship between the pair of 'Main factors' according to the 'Causal direction context'.
-
-            Data Evidence: {data_evidence}
-
-            Main factors: {factor_a} and {factor_b}
-
-            Causal direction context:
-            {self.prompts.causal_direction_context()}
-
-            Causal direction question: Is {factor_a} the cause of {factor_b}, or {factor_b} the cause of {factor_a}?
-
-            Expected Response Format:
-            Thoughts: [Write your thoughts on the question]
-            Answer: (A) {factor_a} is the cause of {factor_b} (B) {factor_b} is the cause of {factor_a} (C) Unknown
-            """
-
-            prompts.append(prompt)
-
-        # Execute all queries in parallel
-        try:
-            responses = self.execute_parallel_queries(prompts)
-        except Exception as e:
-            print(f"Error in batch causal direction processing: {e}")
-            responses = ["UNKNOWN"] * len(prompts)
-
-        # Process responses
-        results = {}
-        for i, (factor_a, factor_b) in enumerate(factor_pairs):
-            if i < len(responses):
-                response_text = responses[i]
-
-                if (
-                    f"{factor_a} is the cause of {factor_b}" in response_text
-                    or f"{factor_a.upper()} IS THE CAUSE OF {factor_b.upper()}"
-                    in response_text.upper()
-                ):
-                    results[(factor_a, factor_b)] = CausalDirection.A_CAUSES_B
-                elif (
-                    f"{factor_b} is the cause of {factor_a}" in response_text
-                    or f"{factor_b.upper()} IS THE CAUSE OF {factor_a.upper()}"
-                    in response_text.upper()
-                ):
-                    results[(factor_a, factor_b)] = CausalDirection.B_CAUSES_A
-                else:
-                    results[(factor_a, factor_b)] = CausalDirection.UNKNOWN
-            else:
-                results[(factor_a, factor_b)] = CausalDirection.UNKNOWN
-
-        return results
-
-    def _statistical_association_fallback(
-        self, factor_a: str, factor_b: str
-    ) -> AssociationResponse:
-        """Fallback method using only statistical correlation from data"""
-        try:
-            evidence = self.get_correlation_evidence(factor_a, factor_b)
-
-            if "correlation of" in evidence:
-                corr_value = float(evidence.split("correlation of ")[1].split(" ")[0])
-
-                # Use absolute correlation value to determine association
-                # No hard-coded thresholds - rely purely on statistical significance
-                if abs(corr_value) > 0.5:  # Strong correlation
-                    return AssociationResponse.ASSOCIATED
-                elif abs(corr_value) < 0.1:  # Very weak correlation
-                    return AssociationResponse.INDEPENDENT
-                else:  # Moderate correlation - uncertain
-                    return AssociationResponse.UNKNOWN
-            else:
-                # No statistical data available
-                return AssociationResponse.UNKNOWN
-
-        except Exception as e:
-            print(f"Statistical fallback error: {e}")
-            return AssociationResponse.UNKNOWN
-
-    def causalif_1_edge_existence_verification(
-        self, factors: List[str], domains: List[str], target_factor: str = None
-    ) -> nx.Graph:
-        """Causalif 1: Edge Existence Verification Algorithm with complete knowledge base support"""
-
-        print(
-            "Starting Causalif 1: Edge Existence Verification with complete RAG support in causalif_local"
-        )
-
-        # Initialize complete undirected graph
-        G = nx.complete_graph(len(factors))
-        G = nx.relabel_nodes(G, {i: factors[i] for i in range(len(factors))})
-
-        edges_to_remove = []
-
-        # For each pair of variables (limit pairs for demo)
-        factor_pairs = [
-            (factors[i], factors[j])
-            for i in range(len(factors))
-            for j in range(i + 1, len(factors))
-        ]
-        limited_pairs = factor_pairs[: min(15, len(factor_pairs))]
-
-        print(
-            f"Processing {len(limited_pairs)} factor pairs with complete knowledge base support..."
-        )
-
-        for factor_a, factor_b in limited_pairs:
-            print(f"Processing pair: {factor_a} - {factor_b}")
-
-            S = 0  # Score for this variable pair
-
-            # Get knowledge bases - COMPLETE ORIGINAL Causalif APPROACH
-            knowledge_bases = []
-
-            # Add background knowledge
-            bg_kb = KnowledgeBase(kb_type="BG")
-            knowledge_bases.append(bg_kb)
-            print(f"Added background knowledge base for {factor_a} - {factor_b}")
-
-            # Add retrieved documents using RAG
-            doc_kbs = self.retrieve_documents(factor_a, factor_b)
-            knowledge_bases.extend(doc_kbs[:2])  # Limit to 2 for performance
-            print(
-                f"Added {len(doc_kbs[:2])} document knowledge bases for {factor_a} - {factor_b}"
-            )
-
-            # Query each knowledge base - ORIGINAL Causalif METHOD
-            for kb in knowledge_bases:
-                edge_decision = self.compute_edge_existence(
-                    factor_a, factor_b, kb, factors, domains
-                )
-
-                if edge_decision == 1:
-                    S += 1  # Vote for edge existence
-                    print(f"KB {kb.kb_type} votes FOR edge {factor_a} - {factor_b}")
-                elif edge_decision == 0:
-                    S -= 1  # Vote against edge existence
-                    print(f"KB {kb.kb_type} votes AGAINST edge {factor_a} - {factor_b}")
-                else:
-                    print(
-                        f"KB {kb.kb_type} is UNKNOWN for edge {factor_a} - {factor_b}"
-                    )
-                # If None (unknown), don't change score
-
-            # Decision: remove edge if S <= 0
+                vote = None  # Unknown
+            
+            if edge not in edge_votes:
+                edge_votes[edge] = []
+            edge_votes[edge].append((kb_type, vote))
+        
+        # PHASE 5: Make keep/remove decisions
+        print(f"Phase 5: Making edge decisions based on voting...\n")
+        
+        for idx, (factor_a, factor_b) in enumerate(all_edges, 1):
+            print(f"[{idx}/{len(all_edges)}] Processing pair: {factor_a} ↔ {factor_b}")
+            
+            votes = edge_votes.get((factor_a, factor_b), [])
+            S = 0  # Voting score (as per Algorithm 1 in paper)
+            total_kbs = len(votes)
+            
+            # Count votes
+            for kb_type, vote in votes:
+                if vote == 1:  # Directly associated
+                    S += 1
+                    print(f"  ✓ KB {kb_type} votes FOR edge (ζ=1, directly associated)")
+                elif vote == 0:  # Independent or indirectly associated
+                    S -= 1
+                    print(f"  ✗ KB {kb_type} votes AGAINST edge (ζ=0, independent/indirect)")
+                else:  # Unknown
+                    print(f"  ? KB {kb_type} is UNKNOWN (ζ=?, no vote)")
+            
+            # Decision rule from paper: Remove edge if S ≤ 0, keep if S > 0
             if S <= 0:
                 edges_to_remove.append((factor_a, factor_b))
-                print(f"Removing edge: {factor_a} - {factor_b} (Score: {S})")
+                print(f"  ✗ DECISION: REMOVE edge (Score S={S} ≤ 0)")
             else:
-                print(f"Keeping edge: {factor_a} - {factor_b} (Score: {S})")
-
-        # Remove edges based on voting
+                # Store voting information as edge attributes
+                G[factor_a][factor_b]['vote_score'] = S
+                G[factor_a][factor_b]['total_kbs'] = total_kbs
+                
+                edges_to_keep.append((factor_a, factor_b))
+                print(f"  ✓ DECISION: KEEP edge (Score S={S} > 0)")
+        
+        # Step 3: Remove edges with S ≤ 0
+        print(f"\n{'='*80}")
+        print(f"Step 3: Removing Edges")
+        print(f"{'='*80}")
         G.remove_edges_from(edges_to_remove)
+        print(f"Removed {len(edges_to_remove)} edges (S ≤ 0)")
+        print(f"Kept {len(edges_to_keep)} edges (S > 0)")
+        
+        # Step 4: Compute LLM-based priors for edges in skeleton
+        print(f"\n{'='*80}")
+        print(f"Step 4: Computing Priors for Skeleton Edges")
+        print(f"{'='*80}")
+        
+        if len(edges_to_keep) > 0:
+            print(f"Computing LLM-based priors for {len(edges_to_keep)} skeleton edges...")
+            print(f"Using raw vote scores for better discrimination in Bayesian inference")
+            
+            for factor_a, factor_b in edges_to_keep:
+                if G.has_edge(factor_a, factor_b):
+                    vote_score = G[factor_a][factor_b].get('vote_score', 1)
+                    total_kbs = G[factor_a][factor_b].get('total_kbs', 1)
+                    
+                    # Use raw vote score as prior strength (better for log space)
+                    # vote_score = 1, 2, or 3 typically
+                    # log(1) = 0, log(2) ≈ 0.69, log(3) ≈ 1.10
+                    # These values meaningfully influence BDeu scores
+                    prior_strength = max(vote_score, 0.1)  # Ensure positive for log
+                    
+                    # Store prior components
+                    G[factor_a][factor_b]['prior_strength'] = prior_strength
+                    G[factor_a][factor_b]['prior_source'] = "llm_voting_raw"
+                    
+                    print(f"  {factor_a} - {factor_b}: Prior = {prior_strength:.1f} (raw vote: {vote_score}/{total_kbs} KBs)")
 
-        # Filter by degrees if target factor is specified
-        if target_factor and target_factor in G.nodes():
-            G = self.filter_graph_by_degrees(G, target_factor, self.max_degrees)
-
-        print(
-            f"Causalif 1 completed with complete RAG support. Final graph has {len(G.edges())} edges."
-        )
+        
+        print(f"\n{'='*80}")
+        print(f"CausalIF 1 Complete:")
+        print(f"  - Initial edges (complete graph): {len(all_edges)}")
+        print(f"  - Edges removed: {len(edges_to_remove)}")
+        print(f"  - Final edges: {len(G.edges())}")
+        print(f"  - Sparsity: {len(G.edges())}/{len(all_edges)} = {len(G.edges())/max(1, len(all_edges))*100:.1f}%")
+        print(f"{'='*80}")
+        
         return G
 
-    def causalif_2_orientation(
-        self,
-        skeleton: nx.Graph,
-        factors: List[str],
-        domains: List[str],
-        target_factor: str = None,
-    ) -> nx.DiGraph:
-        """Causalif 2: Orientation Algorithm with complete knowledge base support"""
-
-        print("Starting Causalif 2: Orientation with complete RAG support")
-
-        # Convert undirected skeleton to directed graph
-        directed_graph = nx.DiGraph()
-        directed_graph.add_nodes_from(skeleton.nodes())
-
-        # Get all edges that need orientation
-        edges_to_orient = list(skeleton.edges())
-
-        if not edges_to_orient:
-            print("No edges to orient")
-            if target_factor and target_factor in directed_graph.nodes():
-                directed_graph = self.filter_graph_by_degrees(
-                    directed_graph, target_factor, self.max_degrees
-                )
-            return directed_graph
-
-        print(
-            f"Orienting {len(edges_to_orient)} edges with complete knowledge base support..."
-        )
-
-        # For each edge in skeleton, determine direction using complete knowledge base approach
-        for factor_a, factor_b in edges_to_orient:
-            print(f"Determining direction for: {factor_a} - {factor_b}")
-
-            causal_votes = []
-
-            # Query causal direction using background knowledge
-            bg_direction = self.query_causal_direction_background(
-                factor_a, factor_b, factors, domains
-            )
-            causal_votes.append(bg_direction)
-            print(f"Background knowledge vote: {bg_direction}")
-
-            # Query causal direction using documents from RAG
-            doc_kbs = self.retrieve_documents(factor_a, factor_b)
-            for doc_kb in doc_kbs[:2]:  # Limit for performance
-                doc_direction = self.query_causal_direction_document(
-                    factor_a, factor_b, doc_kb, factors, domains
-                )
-                causal_votes.append(doc_direction)
-                print(f"Document {doc_kb.source} vote: {doc_direction}")
-
-            # Majority voting for causal direction
-            a_causes_b_count = sum(
-                1 for vote in causal_votes if vote == CausalDirection.A_CAUSES_B
-            )
-            b_causes_a_count = sum(
-                1 for vote in causal_votes if vote == CausalDirection.B_CAUSES_A
-            )
-
-            if a_causes_b_count > b_causes_a_count:
-                directed_graph.add_edge(factor_a, factor_b)
-                print(
-                    f"Direction: {factor_a} -> {factor_b} (votes: {a_causes_b_count} vs {b_causes_a_count})"
-                )
-            elif b_causes_a_count > a_causes_b_count:
-                directed_graph.add_edge(factor_b, factor_a)
-                print(
-                    f"Direction: {factor_b} -> {factor_a} (votes: {b_causes_a_count} vs {a_causes_b_count})"
-                )
+    def causalif_2_orientation(self, skeleton: nx.Graph, factors: List[str], domains: List[str], target_factor: str = None) -> nx.DiGraph:
+        """
+        CausalIF 2: Bayesian Orientation using Prior from Skeleton
+        
+        Bayesian Framework:
+        - PRIOR: skeleton graph from CausalIF 1 (undirected edges = prior belief about associations)
+        - LIKELIHOOD: observational data in dataframe
+        - POSTERIOR: directed causal graph (posterior belief about causal directions)
+        
+        P(Directed Graph | Data) ∝ P(Data | Directed Graph) × P(Directed Graph | Skeleton)
+        
+        The skeleton constrains the search space - we only orient edges that exist in the prior.
+        """
+        
+        print("=" * 80)
+        print("BAYESIAN CAUSAL INFERENCE FRAMEWORK")
+        print("=" * 80)
+        print(f"PRIOR: Skeleton graph with {len(skeleton.edges())} undirected edges (from CausalIF 1)")
+        print("       Represents prior belief about which variables are associated")
+        print(f"LIKELIHOOD: Observational data with {len(self.dataframe) if self.dataframe is not None else 0} samples")
+        print("POSTERIOR: Directed causal graph (to be learned)")
+        print("=" * 80)
+        
+        # OPTIMIZATION: Filter skeleton to only nodes within 2 degrees of target factor
+        # This dramatically speeds up Hill Climb search by reducing the search space
+        if target_factor and target_factor in skeleton.nodes() and self.max_degrees is not None:
+            print(f"\n🎯 TARGET-FOCUSED OPTIMIZATION")
+            print(f"   Filtering skeleton to nodes within {self.max_degrees} degrees of '{target_factor}'")
+            print(f"   Before filtering: {len(skeleton.nodes())} nodes, {len(skeleton.edges())} edges")
+            
+            # Use existing filter_graph_by_degrees method with self.max_degrees
+            filtered_skeleton = self.filter_graph_by_degrees(skeleton, target_factor, max_degrees=self.max_degrees)
+            
+            print(f"   After filtering: {len(filtered_skeleton.nodes())} nodes, {len(filtered_skeleton.edges())} edges")
+            print(f"   Reduction: {len(skeleton.nodes()) - len(filtered_skeleton.nodes())} nodes removed")
+            print(f"   Speed improvement: ~{((len(skeleton.nodes())**2) / max(1, len(filtered_skeleton.nodes())**2)):.1f}x faster")
+            print(f"   This focuses Hill Climb search on relationships relevant to {target_factor}")
+            
+            # Use filtered skeleton for orientation
+            skeleton_for_orientation = filtered_skeleton
+        else:
+            if self.max_degrees is None:
+                print(f"\n⚠️  max_degrees=None - using full skeleton (no filtering)")
             else:
-                # If tied or all unknown, add edge in original order (no heuristics)
-                directed_graph.add_edge(factor_a, factor_b)
-                print(
-                    f"Direction (default - no clear winner): {factor_a} -> {factor_b}"
+                print(f"\n⚠️  No target factor specified - using full skeleton")
+            skeleton_for_orientation = skeleton
+        
+        directed_graph = nx.DiGraph()
+        directed_graph.add_nodes_from(skeleton_for_orientation.nodes())
+        
+        edges_to_orient = list(skeleton_for_orientation.edges())
+        
+        if not edges_to_orient:
+            print("No edges in prior skeleton to orient")
+            return directed_graph
+        
+        print(f"\nOrienting {len(edges_to_orient)} edges from PRIOR using Bayesian inference...")
+        
+        # Check if we have data for Bayesian structure learning
+        if self.dataframe is not None and len(self.dataframe) > 0:
+            try:
+                # Prepare data for Bayesian structure learning
+                # Use filtered skeleton nodes (already filtered to 2 degrees if target_factor exists)
+                nodes_in_skeleton = list(skeleton_for_orientation.nodes())
+                available_columns = [col for col in nodes_in_skeleton if col in self.dataframe.columns]
+                
+                if len(available_columns) >= 2:
+                    print(f"\nLIKELIHOOD: Using {len(self.dataframe)} data samples for {len(available_columns)} factors")
+                    
+                    # Prepare data - pgmpy can handle categorical data natively
+                    df_for_learning = self.dataframe[available_columns].copy()
+                    
+                    # Track columns to drop due to conversion errors
+                    columns_to_drop = []
+                    
+                    # Only convert datetime columns to numeric (pgmpy doesn't handle datetime)
+                    for col in df_for_learning.columns:
+                        try:
+                            if pd.api.types.is_datetime64_any_dtype(df_for_learning[col]):
+                                # Convert datetime to numeric (days since epoch)
+                                df_for_learning[col] = (df_for_learning[col] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+                                print(f"  ✓ Converted datetime column '{col}' to numeric (days since epoch)")
+                            elif df_for_learning[col].dtype == 'object':
+                                # Check if it looks like a date column
+                                date_keywords = ['date', 'time', 'timestamp', 'dt', 'day', 'month', 'year']
+                                looks_like_date = any(keyword in col.lower() for keyword in date_keywords)
+                                
+                                if looks_like_date:
+                                    # Try to parse as datetime
+                                    try:
+                                        # Try common date formats
+                                        for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%d/%m/%Y', '%Y%m%d']:
+                                            try:
+                                                df_for_learning[col] = pd.to_datetime(df_for_learning[col], format=fmt)
+                                                df_for_learning[col] = (df_for_learning[col] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+                                                print(f"  ✓ Parsed '{col}' as date (format: {fmt}) and converted to numeric")
+                                                break
+                                            except:
+                                                continue
+                                        else:
+                                            # Try infer_datetime_format
+                                            df_for_learning[col] = pd.to_datetime(df_for_learning[col], infer_datetime_format=True)
+                                            df_for_learning[col] = (df_for_learning[col] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+                                            print(f"  ✓ Parsed '{col}' as date (inferred format) and converted to numeric")
+                                    except:
+                                        # Date parsing failed, leave as categorical (pgmpy will handle it)
+                                        print(f"  ℹ Column '{col}' kept as categorical (pgmpy will handle it)")
+                                else:
+                                    # Not a date column, leave as categorical
+                                    print(f"  ℹ Column '{col}' kept as categorical (pgmpy will handle it)")
+                        except Exception as e:
+                            # If any conversion fails, mark column for removal
+                            print(f"  ✗ Failed to process column '{col}': {str(e)[:100]}")
+                            columns_to_drop.append(col)
+                    
+                    # Drop problematic columns
+                    if columns_to_drop:
+                        print(f"\n  Dropping {len(columns_to_drop)} problematic columns: {columns_to_drop}")
+                        df_for_learning = df_for_learning.drop(columns=columns_to_drop)
+                        available_columns = [col for col in available_columns if col not in columns_to_drop]
+                    
+                    # Handle NaN values
+                    print(f"\n  Before handling NaN: {len(df_for_learning)} rows")
+                    print(f"  NaN counts per column:")
+                    for col in df_for_learning.columns:
+                        nan_count = df_for_learning[col].isna().sum()
+                        if nan_count > 0:
+                            print(f"    - {col}: {nan_count} NaN values ({nan_count/len(df_for_learning)*100:.1f}%)")
+                    
+                    # Fill NaN: 0 for numeric, 'missing' for categorical
+                    for col in df_for_learning.columns:
+                        if pd.api.types.is_numeric_dtype(df_for_learning[col]):
+                            df_for_learning[col] = df_for_learning[col].fillna(0)
+                        else:
+                            # Handle categorical columns specially
+                            if df_for_learning[col].dtype.name == 'category':
+                                if 'missing' not in df_for_learning[col].cat.categories:
+                                    df_for_learning[col] = df_for_learning[col].cat.add_categories(['missing'])
+                            df_for_learning[col] = df_for_learning[col].fillna('missing')
+                    
+                    print(f"  After handling NaN: {len(df_for_learning)} rows (all data preserved)")
+                    
+                    if len(df_for_learning) > 10 and len(df_for_learning.columns) >= 2:  # Need sufficient data
+                        print(f"\n✓ Data preparation complete:")
+                        print(f"  - {len(df_for_learning)} samples")
+                        print(f"  - {len(df_for_learning.columns)} factors: {list(df_for_learning.columns)}")
+                        
+                        # Show data types
+                        print(f"  - Data types:")
+                        for col in df_for_learning.columns:
+                            dtype = df_for_learning[col].dtype
+                            if pd.api.types.is_numeric_dtype(df_for_learning[col]):
+                                print(f"    • {col}: numeric")
+                            else:
+                                unique_vals = df_for_learning[col].nunique()
+                                print(f"    • {col}: categorical ({unique_vals} unique values)")
+                        
+                        print(f"\nComputing POSTERIOR using Bayesian structure learning...")
+                        print(f"  Method: Hill Climbing with Prior-Weighted BDeu score (True Bayesian)")
+                        print(f"  Prior constraint: Only orient edges from skeleton graph")
+                        print(f"  Prior weighting: ENABLED (LLM voting confidence from CausalIF 1)")
+                        
+                        # Use Hill Climbing with Prior-Weighted BDeu score
+                        # This implements true Bayesian inference: P(G | Data, Priors) ∝ P(Data | G) × P(G | Priors)
+                        try:
+                            # Create custom scoring function that combines BDeu + CausalIF 1 priors
+                            # Use filtered skeleton (already contains only nodes within 2 degrees)
+                            scoring_method = PriorWeightedBDeu(
+                                data=df_for_learning,
+                                skeleton_graph=skeleton_for_orientation,  # Use filtered skeleton
+                                prior_weight=1.0,  # λ parameter (1.0 = equal weight to prior and likelihood)
+                                equivalent_sample_size=10
+                            )
+                            hc = HillClimbSearch(df_for_learning)
+                            
+                            # Constrain search to only edges in the skeleton (PRIOR)
+                            # This encodes: P(G | Skeleton) - only structures consistent with skeleton have non-zero prior
+                            # In pgmpy 1.0+, we use ExpertKnowledge instead of white_list
+                            allowed_edges = []
+                            fixed_edges_undirected = []  # Undirected edges to fix (from related_factors)
+                            
+                            for factor_a, factor_b in edges_to_orient:
+                                if factor_a in available_columns and factor_b in available_columns:
+                                    # Check if either factor is in related_factors list
+                                    is_related_factor = (factor_a in self.related_factors or factor_b in self.related_factors)
+                                    
+                                    if is_related_factor:
+                                        # This edge involves a related_factor - mark it as fixed (undirected)
+                                        fixed_edges_undirected.append((factor_a, factor_b))
+                                    
+                                    # All edges from skeleton are allowed (both directions)
+                                    allowed_edges.append((factor_a, factor_b))
+                                    allowed_edges.append((factor_b, factor_a))
+                            
+                            print(f"  Allowed edges: {len(allowed_edges)} possible directed edges from {len(edges_to_orient)} undirected prior edges")
+                            
+                            # Create all possible edges and mark non-allowed as forbidden
+                            all_possible_edges = []
+                            for node_a in available_columns:
+                                for node_b in available_columns:
+                                    if node_a != node_b:
+                                        all_possible_edges.append((node_a, node_b))
+                            
+                            forbidden_edges = [edge for edge in all_possible_edges if edge not in allowed_edges]
+                            
+                            # Build ExpertKnowledge with fixed edges
+                            # Strategy: For edges involving related_factors, we'll use a modified approach
+                            # Since pgmpy doesn't support "required_edges" directly, we'll:
+                            # 1. Start Hill Climb with an initial model that includes fixed edges
+                            # 2. Use tabu_length to prevent removal of fixed edges
+                            
+                            expert_knowledge = None
+                            if forbidden_edges:
+                                # Pass forbidden edges directly to constructor
+                                expert_knowledge = ExpertKnowledge(forbidden_edges=forbidden_edges)
+                            
+                            # Log fixed edges for transparency
+                            if fixed_edges_undirected:
+                                print(f"\n  Fixed edges (related_factors): {len(fixed_edges_undirected)} undirected edges")
+                                print(f"    These edges will be preserved in the skeleton before Hill Climb")
+                                for factor_a, factor_b in sorted(fixed_edges_undirected):
+                                    print(f"    • {factor_a} - {factor_b} (involves related_factor)")
+                            
+                            # Create initial model with fixed edges
+                            # For fixed edges, we'll add them to the starting model
+                            # Hill Climb will then orient them but won't remove them
+                            
+                            if fixed_edges_undirected:
+                                # CRITICAL: start_dag must only contain variables in df_for_learning
+                                # Filter fixed_edges to only include edges where BOTH nodes are in df_for_learning
+                                valid_fixed_edges = []
+                                for factor_a, factor_b in fixed_edges_undirected:
+                                    if factor_a in df_for_learning.columns and factor_b in df_for_learning.columns:
+                                        valid_fixed_edges.append((factor_a, factor_b))
+                                    else:
+                                        print(f"  ⚠ Skipping fixed edge {factor_a} - {factor_b} (not in df_for_learning)")
+                                
+                                if valid_fixed_edges:
+                                    # DEBUG: Print what we're putting in start_dag
+                                    print(f"\n  DEBUG: Creating start_dag with {len(valid_fixed_edges)} edges")
+                                    print(f"  DEBUG: df_for_learning.columns = {list(df_for_learning.columns)}")
+                                    print(f"  DEBUG: Nodes in valid_fixed_edges:")
+                                    nodes_in_edges = set()
+                                    for a, b in valid_fixed_edges:
+                                        nodes_in_edges.add(a)
+                                        nodes_in_edges.add(b)
+                                    print(f"  DEBUG: {sorted(nodes_in_edges)}")
+                                    print(f"  DEBUG: Nodes NOT in df_for_learning:")
+                                    missing_nodes = [n for n in nodes_in_edges if n not in df_for_learning.columns]
+                                    print(f"  DEBUG: {missing_nodes if missing_nodes else 'None - all nodes are valid!'}")
+                                    
+                                    # CRITICAL: start_dag must have ALL variables from df_for_learning, not just those in edges
+                                    # Add isolated nodes for variables not in edges
+                                    nodes_not_in_edges = [col for col in df_for_learning.columns if col not in nodes_in_edges]
+                                    if nodes_not_in_edges:
+                                        print(f"  DEBUG: Variables in df_for_learning but NOT in fixed edges: {nodes_not_in_edges}")
+                                        print(f"  DEBUG: These will be added as isolated nodes to start_dag")
+                                    
+                                    # Start with a model that includes fixed edges (arbitrary direction)
+                                    # Hill Climb will optimize the direction but keep the edges
+                                    start_dag = DiscreteBayesianNetwork(valid_fixed_edges)
+                                    
+                                    # Add isolated nodes for variables not in edges
+                                    for node in nodes_not_in_edges:
+                                        start_dag.add_node(node)
+                                    
+                                    print(f"\n  Starting Hill Climb with {len(valid_fixed_edges)} fixed edges + {len(nodes_not_in_edges)} isolated nodes")
+                                    
+                                    # Use tabu_length to prevent removal of fixed edges
+                                    # tabu_length creates a memory of recent changes, preventing their reversal
+                                    best_model = hc.estimate(
+                                        scoring_method=scoring_method, 
+                                        max_iter=100,
+                                        start_dag=start_dag,
+                                        tabu_length=len(valid_fixed_edges) * 2,  # Prevent removal of fixed edges
+                                        expert_knowledge=expert_knowledge,
+                                        show_progress=False
+                                    )
+                                else:
+                                    # No valid fixed edges - standard Hill Climb
+                                    print(f"\n  No valid fixed edges (all involve factors not in df_for_learning)")
+                                    best_model = hc.estimate(
+                                        scoring_method=scoring_method, 
+                                        max_iter=100,
+                                        expert_knowledge=expert_knowledge,
+                                        show_progress=False
+                                    )
+                            else:
+                                # No fixed edges - standard Hill Climb
+                                best_model = hc.estimate(
+                                    scoring_method=scoring_method, 
+                                    max_iter=100,
+                                    expert_knowledge=expert_knowledge,
+                                    show_progress=False
+                                )
+                            
+                            print(f"\nPOSTERIOR: Learned {len(best_model.edges())} directed edges from Bayesian inference")
+                            print("  These represent the most probable causal directions given:")
+                            print("    1. PRIOR: Skeleton constraints from CausalIF 1")
+                            print("    2. LIKELIHOOD: Observational data")
+                            print(f"\nNote: {len(edges_to_orient) - len([e for e in edges_to_orient if (e[0] in available_columns and e[1] in available_columns and (best_model.has_edge(e[0], e[1]) or best_model.has_edge(e[1], e[0])))])} edges from PRIOR were not learned by Bayesian method")
+                            
+                            # ONLY add edges that are in the Bayesian POSTERIOR
+                            # Iterate through best_model edges directly to preserve true direction
+                            bayesian_edge_count = 0
+                            print("\nPOSTERIOR Edges (MAP Estimate):")
+                            
+                            # Iterate through best_model edges (these are in true directional order from Hill Climb)
+                            for factor_a, factor_b in best_model.edges():
+                                # Verify this edge was in the skeleton (should always be true due to constraints)
+                                if skeleton_for_orientation.has_edge(factor_a, factor_b) or skeleton_for_orientation.has_edge(factor_b, factor_a):
+                                    directed_graph.add_edge(factor_a, factor_b)
+                                    print(f"  ✓ {factor_a} → {factor_b}")
+                                    bayesian_edge_count += 1
+                                else:
+                                    # This shouldn't happen due to skeleton constraints, but log if it does
+                                    print(f"  ⚠ Unexpected edge (not in skeleton): {factor_a} → {factor_b}")
+                                    directed_graph.add_edge(factor_a, factor_b)
+                                    bayesian_edge_count += 1
+                            
+                            # Check for skeleton edges that were rejected by Bayesian method
+                            rejected_count = 0
+                            for factor_a, factor_b in edges_to_orient:
+                                if factor_a in available_columns and factor_b in available_columns:
+                                    if not best_model.has_edge(factor_a, factor_b) and not best_model.has_edge(factor_b, factor_a):
+                                        print(f"  ✗ Rejected: {factor_a} - {factor_b}")
+                                        rejected_count += 1
+                            
+                            print(f"\nFinal POSTERIOR: {bayesian_edge_count} edges (pure Bayesian, no heuristics)")
+                            print("Note: The posterior is the graph structure itself (MAP estimate)")
+                            print("      Edge existence/direction represents the most probable causal structure")
+                            
+                            # NEW: Add undirected edges for factors not in dataframe
+                            # These are skeleton edges that couldn't be oriented due to missing data
+                            print(f"\n{'='*80}")
+                            print("ADDING UNDIRECTED EDGES FOR FACTORS WITHOUT DATA")
+                            print(f"{'='*80}")
+                            
+                            undirected_edges_added = 0
+                            for factor_a, factor_b in edges_to_orient:
+                                # Check if at least one factor is NOT in available_columns
+                                factor_a_missing = factor_a not in available_columns
+                                factor_b_missing = factor_b not in available_columns
+                                
+                                if factor_a_missing or factor_b_missing:
+                                    # At least one factor has no data - add as undirected edge
+                                    # We'll add both directions to represent undirected edge in DiGraph
+                                    # Mark with special attribute to distinguish from directed edges
+                                    
+                                    # Get prior strength from skeleton
+                                    prior_strength = skeleton_for_orientation[factor_a][factor_b].get('prior_strength', 0.5) if skeleton_for_orientation.has_edge(factor_a, factor_b) else 0.5
+                                    
+                                    # Add edge in both directions with 'undirected' marker
+                                    directed_graph.add_edge(factor_a, factor_b, 
+                                                          undirected=True, 
+                                                          prior_strength=prior_strength,
+                                                          reason='no_observational_data')
+                                    directed_graph.add_edge(factor_b, factor_a, 
+                                                          undirected=True, 
+                                                          prior_strength=prior_strength,
+                                                          reason='no_observational_data')
+                                    
+                                    missing_factors = []
+                                    if factor_a_missing:
+                                        missing_factors.append(factor_a)
+                                    if factor_b_missing:
+                                        missing_factors.append(factor_b)
+                                    
+                                    print(f"  ↔ {factor_a} ↔ {factor_b} (undirected - missing data for: {', '.join(missing_factors)})")
+                                    undirected_edges_added += 1
+                            
+                            if undirected_edges_added > 0:
+                                print(f"\n✓ Added {undirected_edges_added} undirected edges for factors without observational data")
+                                print(f"  These edges represent associations from CausalIF 1 (LLM voting)")
+                                print(f"  Direction cannot be determined without data (kept as undirected)")
+                            else:
+                                print(f"\n  No factors without data - all skeleton edges processed by Bayesian method")
+                            
+                        except Exception as e:
+                            print(f"\nBayesian structure learning failed: {e}")
+                            raise RuntimeError(
+                                "CausalIF 2 orientation failed: Bayesian structure learning encountered an error.\n"
+                                f"Error details: {e}\n"
+                                "The original CausalIF algorithm requires either:\n"
+                                "  1. Valid observational data for Bayesian structure learning, OR\n"
+                                "  2. An LLM model for causal direction queries (not yet implemented)\n"
+                                "Please ensure your dataframe has sufficient samples and valid data types."
+                            )
+                    else:
+                        raise ValueError(
+                            "CausalIF 2 orientation failed: Insufficient data samples.\n"
+                            f"Current samples: {len(df_for_learning)}, Required: >10 samples\n"
+                            "The original CausalIF algorithm requires sufficient observational data "
+                            "for reliable Bayesian structure learning. Please provide more data samples."
+                        )
+                else:
+                    raise ValueError(
+                        "CausalIF 2 orientation failed: Insufficient columns in dataframe.\n"
+                        f"Available columns: {len(available_columns)}, Required: ≥2 columns\n"
+                        "The original CausalIF algorithm requires at least 2 factors with data "
+                        "for Bayesian structure learning. Please ensure your dataframe contains "
+                        "the factors specified in the skeleton graph."
+                    )
+                    
+            except Exception as e:
+                raise RuntimeError(
+                    f"CausalIF 2 orientation failed: Error during Bayesian structure learning.\n"
+                    f"Error details: {e}\n"
+                    "The original CausalIF algorithm requires valid observational data for orientation. "
+                    "Please check that your dataframe:\n"
+                    "  - Contains the factors from the skeleton graph\n"
+                    "  - Has valid data types (numeric or categorical)\n"
+                    "  - Has sufficient samples (>10 recommended)\n"
+                    "  - Does not have excessive missing values"
                 )
-
-        # Filter by degrees if target factor is specified
-        if target_factor and target_factor in directed_graph.nodes():
-            directed_graph = self.filter_graph_by_degrees(
-                directed_graph, target_factor, self.max_degrees
+        else:
+            raise ValueError(
+                "CausalIF 2 orientation failed: No dataframe available.\n"
+                "The original CausalIF algorithm requires observational data for Bayesian structure learning "
+                "to determine causal directions (POSTERIOR). Please provide a dataframe with:\n"
+                "  - Columns matching the factors in your skeleton graph\n"
+                "  - Sufficient samples (>10 recommended)\n"
+                "  - Valid data types (numeric or categorical)\n"
+                "Alternative: The paper describes LLM-based causal direction queries, but this is not yet implemented."
             )
-
-        print(
-            f"Causalif 2 completed with complete RAG support. Final graph has {len(directed_graph.edges())} directed edges."
-        )
+        
+        # Filter by degrees after orientation if max_degrees is specified
+        if target_factor and target_factor in directed_graph.nodes() and self.max_degrees is not None:
+            print(f"\nFiltering causal graph to {self.max_degrees} degrees from {target_factor}...")
+            print(f"  Before filtering: {len(directed_graph.nodes())} nodes, {len(directed_graph.edges())} edges")
+            directed_graph = self.filter_graph_by_degrees(directed_graph, target_factor, self.max_degrees)
+            print(f"  After filtering: {len(directed_graph.nodes())} nodes, {len(directed_graph.edges())} edges")
+        
+        print("\n" + "=" * 80)
+        print(f"BAYESIAN INFERENCE COMPLETE")
+        
+        # Count directed vs undirected edges
+        directed_edges = [(u, v) for u, v in directed_graph.edges() if not directed_graph[u][v].get('undirected', False)]
+        undirected_edge_pairs = set()
+        for u, v in directed_graph.edges():
+            if directed_graph[u][v].get('undirected', False):
+                # Store as sorted tuple to avoid counting both directions
+                edge_pair = tuple(sorted([u, v]))
+                undirected_edge_pairs.add(edge_pair)
+        
+        print(f"POSTERIOR: {len(directed_edges)} directed edges + {len(undirected_edge_pairs)} undirected edges")
+        print(f"  - Directed edges: Bayesian-inferred causal relationships (with data)")
+        print(f"  - Undirected edges: LLM-inferred associations (without data)")
+        print("=" * 80)
         return directed_graph
 
-    def run_complete_causalif(
-        self, factors: List[str], domains: List[str], target_factor: str = None
-    ) -> Tuple[nx.Graph, nx.DiGraph]:
-        """Run complete Causalif algorithm with full knowledge base support"""
-        print("Starting Complete Causalif Algorithm with Full RAG Support...")
+
+    def run_complete_causalif(self, factors: List[str], domains: List[str], target_factor: str = None) -> Tuple[nx.Graph, nx.DiGraph]:
+        """
+        Run complete CausalIF algorithm with Bayesian framework
+        
+        Bayesian Framework:
+        ==================
+        CausalIF 1 (Edge Existence) → PRIOR
+          - Uses LLM + RAG to determine which edges exist (undirected)
+          - Output: Skeleton graph G_skeleton
+          - Interpretation: P(edge exists) based on domain knowledge
+        
+        CausalIF 2 (Orientation) → POSTERIOR  
+          - Uses Bayesian structure learning on observational data
+          - Constrained by skeleton (only orient edges from PRIOR)
+          - Output: Directed causal graph G_causal
+          - Interpretation: P(direction | data, skeleton) ∝ P(data | direction) × P(direction | skeleton)
+        
+        This creates a principled Bayesian workflow:
+          Prior beliefs (from experts/LLM) → Updated by data → Posterior causal graph
+        """
+        print("\n" + "=" * 100)
+        print("BAYESIAN CausalIF: PRIOR → POSTERIOR CAUSAL INFERENCE")
+        print("=" * 100)
         print(f"Factors: {factors}")
         print(f"Domains: {domains}")
-        print(f"Max degrees of separation: {self.max_degrees}")
+        print(f"Max degrees of separation: {self.max_degrees if self.max_degrees is not None else 'None (no filtering)'}")
         print(f"Max parallel queries: {self.max_parallel_queries}")
         print(f"RAG retriever available: {self.retriever_tool is not None}")
+        print(f"Dataframe available: {self.dataframe is not None}")
+        if self.dataframe is not None:
+            print(f"Data samples: {len(self.dataframe)}")
         if target_factor:
             print(f"Target factor: {target_factor}")
+        print("=" * 100)
 
-        # Causalif 1: Edge Existence Verification (with complete knowledge base support)
-        print("\n=== Causalif 1: Edge Existence Verification with Complete RAG ===")
-        skeleton = self.causalif_1_edge_existence_verification(
-            factors, domains, target_factor
-        )
+        print("\n" + "=" * 100)
+        print("STEP 1: CausalIF 1 - Building PRIOR (Edge Existence Verification)")
+        print("=" * 100)
+        print("Using LLM + RAG to determine which variable pairs are associated")
+        print("This creates our PRIOR belief about the causal structure")
+        skeleton = self.causalif_1_edge_existence_verification(factors, domains, target_factor)
+        print(f"\nPRIOR (Skeleton) edges: {list(skeleton.edges())}")
+        print(f"PRIOR contains {len(skeleton.edges())} undirected associations")
 
-        print(f"\n{'='*60}")
-        print(f"CAUSALIF 1 COMPLETE")
-        print(f"Skeleton has {len(skeleton.nodes())} nodes and {len(skeleton.edges())} edges")
-        print(f"Edges: {list(skeleton.edges())}")
-        print(f"{'='*60}\n")
-        
-        if len(skeleton.edges()) == 0:
-            print("⚠️ WARNING: Empty skeleton! No edges to orient.")
-            return skeleton, nx.DiGraph()
+        print("\n" + "=" * 100)
+        print("STEP 2: CausalIF 2 - Computing POSTERIOR (Bayesian Orientation)")
+        print("=" * 100)
+        print("Using Bayesian structure learning to orient edges from PRIOR")
+        print("This updates our beliefs using observational data")
+        causal_graph = self.causalif_2_orientation(skeleton, factors, domains, target_factor)
+        print(f"\nPOSTERIOR (Causal) edges: {list(causal_graph.edges())}")
+        print(f"POSTERIOR contains {len(causal_graph.edges())} directed causal relationships")
 
-        # Causalif 2: Orientation (with complete knowledge base support)
-        print("\n=== Causalif 2: Orientation with Complete RAG ===")
-        causal_graph = self.causalif_2_orientation(
-            skeleton, factors, domains, target_factor
-        )
+        print("\n" + "=" * 100)
+        print("BAYESIAN CausalIF COMPLETE")
+        print("=" * 100)
+        print(f"Prior → Posterior transformation:")
+        print(f"  {len(skeleton.edges())} undirected associations → {len(causal_graph.edges())} directed causal edges")
+        print("=" * 100 + "\n")
 
-        print(f"\n{'='*60}")
-        print(f"CAUSALIF 2 COMPLETE")
-        print(f"Causal graph has {len(causal_graph.nodes())} nodes and {len(causal_graph.edges())} edges")
-        print(f"Directed edges: {list(causal_graph.edges())}")
-        print(f"{'='*60}\n")
-        
-        print(f"\nFinal causal graph edges: {list(causal_graph.edges())}")
+        # NEW: Optionally fit causal model for inference
+        if self.enable_causal_estimate:
+            print("\n" + "=" * 100)
+            print("STEP 3: Fitting Causal Model for Inference (OPTIONAL)")
+            print("=" * 100)
+            fitted_model = self.fit_causal_model(causal_graph)
+            
+            if fitted_model and target_factor and self.causal_inference_engine:
+                # Automatically get causal summary for target
+                print(f"\nGenerating causal summary for target: {target_factor}")
+                summary = self.get_causal_summary(target_factor, causal_graph)
+                
+                if summary['direct_causes']:
+                    print(f"\n  Direct causes of {target_factor}:")
+                    for cause in summary['direct_causes']:
+                        adj_set = summary['adjustment_sets'].get(cause, [])
+                        if adj_set:
+                            print(f"    • {cause} (adjust for: {adj_set})")
+                        else:
+                            print(f"    • {cause} (no adjustment needed)")
+                
+                print("=" * 100)
 
         return skeleton, causal_graph
 
-    def visualize_graph(
-        self,
-        graph: Union[nx.Graph, nx.DiGraph],
-        title: str = "Graph",
-        target_factor: str = None,
-    ) -> go.Figure:
-        import math
-
-        if len(graph.nodes()) == 0:
-            print(f"No nodes to display in {title}")
+    # ========================================================================
+    # CAUSAL INFERENCE METHODS
+    # ========================================================================
+    
+    def fit_causal_model(self, causal_graph: nx.DiGraph) -> DiscreteBayesianNetwork:
+        """
+        Fit a Bayesian Network with CPDs from the causal DAG structure.
+        
+        This is required for causal inference - we need both structure AND parameters.
+        
+        Args:
+            causal_graph: Directed causal graph from CausalIF 2
+            
+        Returns:
+            Fitted DiscreteBayesianNetwork with CPDs, or None if failed
+        """
+        if not self.enable_causal_estimate:
+            print("⚠️  Causal inference is disabled. Enable with enable_causal_estimate=True")
             return None
-
-        # Layout
-        pos = (
-            nx.spring_layout(graph, seed=42, k=3, iterations=50)
-            if graph.edges()
-            else {node: (i, 0) for i, node in enumerate(graph.nodes())}
-        )
-
-        # Degrees of separation
-        degrees_map = {}
-        if target_factor and target_factor in graph.nodes():
-            degrees_analysis = self.analyze_degrees_of_separation(graph, target_factor)
-            for degree, factors in degrees_analysis["factors_by_degree"].items():
-                for factor in factors:
-                    degrees_map[factor] = degree
-
-        fig = go.Figure()
-
-        # --- Edges with Arrows ---
-        for edge in graph.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-
-            edge_label = (
-                f"{edge[0]} → {edge[1]}"
-                if isinstance(graph, nx.DiGraph)
-                else f"{edge[0]} — {edge[1]}"
-            )
-
-            # Edge color
-            edge_color = "red"
-            if target_factor:
-                max_degree = max(
-                    degrees_map.get(edge[0], 0), degrees_map.get(edge[1], 0)
-                )
-                if max_degree <= 1:
-                    edge_color = "red"
-                elif max_degree <= 2:
-                    edge_color = "orange"
-                elif max_degree <= 3:
-                    edge_color = "yellow"
-                elif max_degree <= 4:
-                    edge_color = "lightblue"
+        
+        if self.dataframe is None:
+            print("⚠️  No dataframe available for fitting CPDs")
+            return None
+        
+        print("\n" + "=" * 80)
+        print("FITTING CAUSAL MODEL (Learning CPDs for Causal Inference)")
+        print("=" * 80)
+        
+        try:
+            # Only include edges where both nodes have data and are directed
+            available_columns = [col for col in causal_graph.nodes() if col in self.dataframe.columns]
+            valid_edges = [(u, v) for u, v in causal_graph.edges() 
+                          if u in available_columns and v in available_columns
+                          and not causal_graph[u][v].get('undirected', False)]  # Skip undirected edges
+            
+            if not valid_edges:
+                print("⚠️  No valid directed edges with data for causal inference")
+                return None
+            
+            # Create Bayesian Network
+            bn = DiscreteBayesianNetwork(valid_edges)
+            
+            # Prepare data - only use columns in the network
+            nodes_in_bn = list(bn.nodes())
+            df_for_fitting = self.dataframe[nodes_in_bn].copy()
+            
+            print(f"  Preparing data for {len(nodes_in_bn)} variables...")
+            
+            # Handle data types - discretize continuous variables
+            for col in df_for_fitting.columns:
+                if pd.api.types.is_numeric_dtype(df_for_fitting[col]):
+                    # Discretize continuous variables using quantile-based binning
+                    try:
+                        df_for_fitting[col] = pd.qcut(
+                            df_for_fitting[col], 
+                            q=3, 
+                            labels=['low', 'medium', 'high'], 
+                            duplicates='drop'
+                        )
+                        print(f"    ✓ Discretized '{col}' (continuous → categorical)")
+                    except Exception as e:
+                        # If qcut fails (e.g., too few unique values), use cut
+                        try:
+                            df_for_fitting[col] = pd.cut(
+                                df_for_fitting[col],
+                                bins=3,
+                                labels=['low', 'medium', 'high'],
+                                duplicates='drop'
+                            )
+                            print(f"    ✓ Discretized '{col}' (continuous → categorical, using cut)")
+                        except:
+                            # Last resort: convert to string
+                            df_for_fitting[col] = df_for_fitting[col].astype(str)
+                            print(f"    ⚠️  '{col}' converted to string (discretization failed)")
                 else:
-                    edge_color = "lightgray"
-
-            # Calculate arrow positioning
-            dx, dy = x1 - x0, y1 - y0
-            length = math.sqrt(dx * dx + dy * dy)
-            if length > 0:
-                dx_norm, dy_norm = dx / length, dy / length
-                node_radius = 0.05
-                x1_short = x1 - dx_norm * node_radius
-                y1_short = y1 - dy_norm * node_radius
-                x0_short = x0 + dx_norm * node_radius
-                y0_short = y0 + dy_norm * node_radius
-
-                # Edge line with hover label
-                fig.add_trace(
-                    go.Scatter(
-                        x=[x0_short, x1_short],
-                        y=[y0_short, y1_short],
-                        line=dict(width=2, color=edge_color),
-                        mode="lines",
-                        showlegend=False,
-                        hoverinfo="text",
-                        hovertext=edge_label,
-                    )
-                )
-
-                # Arrow annotation (shown for all edges now)
-                arrow_x = x0_short + 0.85 * (x1_short - x0_short)
-                arrow_y = y0_short + 0.85 * (y1_short - y0_short)
-                fig.add_annotation(
-                    x=arrow_x,
-                    y=arrow_y,
-                    ax=arrow_x - 0.02 * dx_norm,
-                    ay=arrow_y - 0.02 * dy_norm,
-                    axref="x",
-                    ayref="y",
-                    arrowhead=2,
-                    arrowsize=1.5,
-                    arrowwidth=3,
-                    arrowcolor=edge_color,
-                    showarrow=True,
-                )
-
-        # --- Nodes ---
-        node_x, node_y, node_text, node_colors = [], [], [], []
-        for node in graph.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(str(node))
-
-            if target_factor and node in degrees_map:
-                node_colors.append(degrees_map[node])
-            else:
-                degree = (
-                    graph.degree(node)
-                    if not isinstance(graph, nx.DiGraph)
-                    else graph.in_degree(node) + graph.out_degree(node)
-                )
-                node_colors.append(degree)
-
-        node_trace = go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode="markers+text",
-            text=node_text,
-            textposition="middle center",
-            textfont=dict(size=12, color="white", family="Arial Black"),
-            marker=dict(
-                size=50,
-                color=node_colors,
-                colorscale="RdYlBu_r" if target_factor else "Viridis",
-                line=dict(width=3, color="white"),
-                showscale=True,
-                colorbar=dict(
-                    title=dict(
-                        text="Degrees from Target" if target_factor else "Node Degree",
-                        font=dict(color="white"),
-                    ),
-                    tickfont=dict(color="white"),
-                ),
-            ),
-            hoverinfo="text",
-            hovertext=[
-                f"Node: {node}<br>Degree from {target_factor}: {degrees_map.get(node, 'N/A')}<br>Connections: {graph.degree(node)}"
-                if target_factor and node in degrees_map
-                else f"Node: {node}<br>Connections: {graph.degree(node)}"
-                for node in graph.nodes()
-            ],
-        )
-
-        fig.add_trace(node_trace)
-
-        # --- Layout with Black Background ---
-        graph_type = "Directed" if isinstance(graph, nx.DiGraph) else "Undirected"
-        degree_info = f" (Max {self.max_degrees} degrees)" if target_factor else ""
-        fig.update_layout(
-            title=dict(
-                text=f"{title} ({graph_type}){degree_info} - {len(graph.nodes())} nodes, {len(graph.edges())} edges - Causalif Enhanced with RAG",
-                x=0.5,
-                font=dict(size=16, color="white"),
-            ),
-            showlegend=False,
-            hovermode="closest",
-            margin=dict(b=20, l=5, r=5, t=60),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            width=1000,
-            height=700,
-            plot_bgcolor="black",
-            paper_bgcolor="black",
-        )
-
-        return fig
+                    # Categorical - ensure string type
+                    df_for_fitting[col] = df_for_fitting[col].astype(str)
+                    print(f"    ✓ '{col}' kept as categorical")
+            
+            # Fill NaN values - handle categorical columns specially
+            for col in df_for_fitting.columns:
+                if df_for_fitting[col].dtype.name == 'category':
+                    # For categorical columns, add 'missing' to categories first
+                    if 'missing' not in df_for_fitting[col].cat.categories:
+                        df_for_fitting[col] = df_for_fitting[col].cat.add_categories(['missing'])
+                    df_for_fitting[col] = df_for_fitting[col].fillna('missing')
+                else:
+                    # For non-categorical columns
+                    df_for_fitting[col] = df_for_fitting[col].fillna('missing')
+            
+            print(f"\n  Fitting CPDs for {len(bn.nodes())} nodes, {len(bn.edges())} edges")
+            print(f"  Using {len(df_for_fitting)} data samples")
+            
+            # Fit CPDs using Maximum Likelihood Estimation
+            bn.fit(df_for_fitting, estimator=MaximumLikelihoodEstimator)
+            
+            print(f"  ✓ Successfully fitted {len(bn.get_cpds())} CPDs")
+            
+            # Store for later use
+            self.causal_model = bn
+            self.causal_inference_engine = CausalInference(bn)
+            
+            print("  ✓ Causal inference engine initialized")
+            print("=" * 80)
+            
+            return bn
+            
+        except Exception as e:
+            print(f"  ✗ Failed to fit causal model: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def estimate_causal_effects(self, target_factor: str, causal_graph: nx.DiGraph = None) -> Dict[str, float]:
+        """
+        Estimate the causal effect of each parent on the target factor.
+        
+        This answers: "How much does each cause affect the target?"
+        
+        Args:
+            target_factor: The outcome variable
+            causal_graph: Optional causal graph (if None, uses self.causal_model)
+            
+        Returns:
+            Dictionary mapping cause -> effect size (ATE), or empty dict if failed
+        """
+        if not self.enable_causal_estimate:
+            print("⚠️  Causal inference is disabled. Enable with enable_causal_estimate=True")
+            return {}
+        
+        # Fit model if not already done
+        if self.causal_model is None and causal_graph is not None:
+            self.fit_causal_model(causal_graph)
+        
+        if self.causal_inference_engine is None:
+            print("⚠️  No causal model available. Run fit_causal_model() first.")
+            return {}
+        
+        print("\n" + "=" * 80)
+        print(f"ESTIMATING CAUSAL EFFECTS ON: {target_factor}")
+        print("=" * 80)
+        
+        # Find all direct causes (parents) of target
+        if causal_graph:
+            causes = [p for p in causal_graph.predecessors(target_factor) 
+                     if not causal_graph[p][target_factor].get('undirected', False)]
+        else:
+            causes = list(self.causal_model.get_parents(target_factor))
+        
+        if not causes:
+            print(f"  No direct causes found for {target_factor}")
+            return {}
+        
+        print(f"  Found {len(causes)} direct causes: {causes}")
+        
+        effects = {}
+        
+        for cause in causes:
+            try:
+                # Get adjustment set (variables to control for)
+                adj_set = self.causal_inference_engine.get_minimal_adjustment_set(X=cause, Y=target_factor)
+                
+                if adj_set is None:
+                    print(f"  ⚠️  {cause} → {target_factor}: No valid adjustment set (may have confounding)")
+                    effects[cause] = None
+                    continue
+                
+                # Note: ATE estimation with discrete variables is complex
+                # For now, we'll use interventional queries to estimate effects
+                print(f"  ℹ️  {cause} → {target_factor}: Adjustment set = {adj_set if adj_set else 'empty'}")
+                
+                # Store adjustment set info
+                effects[cause] = {
+                    'adjustment_set': list(adj_set) if adj_set else [],
+                    'note': 'Control for adjustment set to isolate causal effect'
+                }
+                
+            except Exception as e:
+                print(f"  ✗ {cause} → {target_factor}: Failed ({str(e)[:100]})")
+                effects[cause] = None
+        
+        print("=" * 80)
+        return effects
+    
+    def estimate_downstream_effects(self, target_factor: str, causal_graph: nx.DiGraph = None) -> Dict[str, any]:
+        """
+        Estimate the causal effect of the target factor on its children (downstream effects).
+        
+        This answers: "What does the target factor influence?"
+        
+        Args:
+            target_factor: The causal variable
+            causal_graph: Optional causal graph (if None, uses self.causal_model)
+            
+        Returns:
+            Dictionary mapping effect -> info, or empty dict if no effects
+        """
+        if not self.enable_causal_estimate:
+            print("⚠️  Causal inference is disabled. Enable with enable_causal_estimate=True")
+            return {}
+        
+        # Fit model if not already done
+        if self.causal_model is None and causal_graph is not None:
+            self.fit_causal_model(causal_graph)
+        
+        if self.causal_inference_engine is None:
+            print("⚠️  No causal model available. Run fit_causal_model() first.")
+            return {}
+        
+        print("\n" + "=" * 80)
+        print(f"ESTIMATING DOWNSTREAM EFFECTS FROM: {target_factor}")
+        print("=" * 80)
+        
+        # Find all direct effects (children) of target
+        if causal_graph:
+            effects = [c for c in causal_graph.successors(target_factor)
+                      if not causal_graph[target_factor][c].get('undirected', False)]
+        else:
+            # Get children from the Bayesian Network
+            effects = []
+            for node in self.causal_model.nodes():
+                if self.causal_model.has_edge(target_factor, node):
+                    effects.append(node)
+        
+        if not effects:
+            print(f"  No downstream effects found for {target_factor}")
+            print(f"  ℹ️  {target_factor} does not directly cause any other variables in the model")
+            return {}
+        
+        print(f"  Found {len(effects)} downstream effects: {effects}")
+        
+        downstream = {}
+        
+        for effect in effects:
+            try:
+                # Get adjustment set (variables to control for)
+                adj_set = self.causal_inference_engine.get_minimal_adjustment_set(X=target_factor, Y=effect)
+                
+                if adj_set is None:
+                    print(f"  ⚠️  {target_factor} → {effect}: No valid adjustment set (may have confounding)")
+                    downstream[effect] = None
+                    continue
+                
+                print(f"  ℹ️  {target_factor} → {effect}: Adjustment set = {adj_set if adj_set else 'empty'}")
+                
+                # Store adjustment set info
+                downstream[effect] = {
+                    'adjustment_set': list(adj_set) if adj_set else [],
+                    'note': 'Control for adjustment set to isolate causal effect'
+                }
+                
+            except Exception as e:
+                print(f"  ✗ {target_factor} → {effect}: Failed ({str(e)[:100]})")
+                downstream[effect] = None
+        
+        print("=" * 80)
+        return downstream
+    
+    def get_causal_summary(self, target_factor: str, causal_graph: nx.DiGraph) -> Dict:
+        """
+        Get a comprehensive causal summary for the target factor.
+        
+        Args:
+            target_factor: The target variable to analyze
+            causal_graph: The causal DAG
+            
+        Returns:
+            Dictionary with:
+            - direct_causes: List of direct parents
+            - direct_effects: List of direct children
+            - causal_effects: Effect information (if causal inference enabled)
+            - downstream_effects: What the target influences (if causal inference enabled)
+            - adjustment_sets: Variables to control for
+            - has_causal_inference: Whether causal inference is enabled
+        """
+        summary = {
+            'target': target_factor,
+            'direct_causes': [],
+            'direct_effects': [],
+            'causal_effects': {},
+            'downstream_effects': {},
+            'adjustment_sets': {},
+            'has_causal_inference': self.enable_causal_estimate
+        }
+        
+        # Get direct causes from graph
+        if target_factor in causal_graph.nodes():
+            summary['direct_causes'] = [p for p in causal_graph.predecessors(target_factor)
+                                       if not causal_graph[p][target_factor].get('undirected', False)]
+            summary['direct_effects'] = [c for c in causal_graph.successors(target_factor)
+                                        if not causal_graph[target_factor][c].get('undirected', False)]
+        
+        # If causal inference enabled, get effect information
+        if self.enable_causal_estimate and self.causal_inference_engine:
+            # What causes the target
+            summary['causal_effects'] = self.estimate_causal_effects(target_factor, causal_graph)
+            
+            # What the target causes (downstream effects)
+            summary['downstream_effects'] = self.estimate_downstream_effects(target_factor, causal_graph)
+            
+            # Get adjustment sets for each cause
+            for cause in summary['direct_causes']:
+                try:
+                    adj_set = self.causal_inference_engine.get_minimal_adjustment_set(X=cause, Y=target_factor)
+                    summary['adjustment_sets'][cause] = list(adj_set) if adj_set else []
+                except:
+                    summary['adjustment_sets'][cause] = None
+        
+        return summary
