@@ -9,7 +9,6 @@ import pandas as pd
 import networkx as nx
 import plotly.graph_objects as go
 from langchain_core.tools import tool
-import streamlit as st
 
 from .engine import CausalIFEngine
 from .visualization import visualize_causalif_results
