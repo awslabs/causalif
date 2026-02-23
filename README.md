@@ -471,7 +471,7 @@ causalif/
 
 ## Limitations
 
-### This method isn't ideal for only quantitative data and feedback loop driven inference. This method is built aiming finding hybrid association and causality among qualitative and quatitative data sets. 
+### This method isn't ideal for only quantitative data and feedback loop driven inference. This method is built aiming finding hybrid association and causality among qualitative and quatitative data sets.
 
 ### Data & Computational
 
@@ -518,6 +518,7 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
+- **v0.1.9.2**: Adding the LLM votes for each edge to only local bdeu scores.
 - **v0.1.9.1**: Remeved LLM based causal directions and introduced bayesian based causal direction with hill climb search and immediate upstream and downstream effects. Building a hybrid graph with associations and causal directions.
 - **v0.1.6**: Removed directed graph dependencies, added example notebook.
 - **v0.1.5**: README updates.
