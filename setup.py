@@ -13,7 +13,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="causalif",
-    version="0.1.9.2",
+    version="0.1.9.3",
     author="Subhro Bose",
     author_email="bossubhr@amazon.co.uk",
     description="Large Language Models (LLMs) with Bayesian causal inference to discover causal relationships and associations from observational data and domain knowledge",
