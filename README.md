@@ -22,28 +22,30 @@
 
 ## Overview
 
-Causalif combines Large Language Models (LLMs) with Bayesian causal inference to discover causal relationships and associations from observational data and domain knowledge. Unlike traditional causal discovery algorithms that rely solely on statistical patterns, Causalif leverages:
+Causalif, an experimental project, combines Large Language Models (LLMs) with hill climb algorithm and causal inference from pgmpy library to discover causal relationships and associations from observational data and domain knowledge. Unlike traditional causal discovery algorithms that rely solely on statistical patterns, Causalif leverages:
 
 - **Background Knowledge**: LLM's pre-trained knowledge about causal relationships
 - **Document Knowledge**: Domain-specific documents retrieved via RAG
 - **Statistical Evidence**: Correlation patterns from observational data
 - **Bayesian Structure Learning**: Data-driven causal graph orientation
 
-This hybrid approach enables causal discovery and associations even with limited data or when statistical methods alone are insufficient.
+This hybrid approach enables causal discovery and associations when the use case seeks to understand from qualitative data what possible associations of a target factor could be present and then which factors in the data are influencing corresponding factors. 
 
 Note: LLM interpretation of causalif is best realised when this library is used as a tool in agentic systems.
 
 **GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif)  
-**PyPI**: [causalif](https://pypi.org/project/causalif/) (**reference paper for LACR 1 algorithm**: https://arxiv.org/html/2402.15301v2)
+**PyPI**: [causalif](https://pypi.org/project/causalif/) 
+
+The direct and independent relationships have been inspired from the LACR 1 algorithm in paper: https://arxiv.org/html/2402.15301v2
 
 ---
 
 ## Ideal Use Cases
 
-Causalif is particularly powerful when you have both qualitative domain knowledge and quantitative observational data. The library excels at discovering causal relationships between derived factors by combining: It is ideal to be integrated as a tool to agentic workflows so that the agent can interpret its results and provides an overall response to the user.
+Causalif is particularly powerful when you have both qualitative domain knowledge and quantitative observational data. It is ideal to be integrated as a tool to agentic workflows so that the agent can interpret its results and provides an overall response to the user.
 
-1. **Qualitative Knowledge**: Documents containing formulas, relationships, and domain expertise
-2. **Quantitative Data**: Noisy observational data that fuels those formulas
+1. **Qualitative Knowledge**: Documents containing formulae, relationships, and domain expertise
+2. **Quantitative Data**: Noisy observational data that fuels those formulae
 
 ### Example: Financial Analysis
 
@@ -51,7 +53,7 @@ Causalif is particularly powerful when you have both qualitative domain knowledg
 
 **What They Have**:
 - **Qualitative Finance Data**: Research papers, financial articles, analyst reports, and documents describing:
-  - Derived formulas (e.g., "ROE = Net Income / Shareholder Equity")
+  - Derived formulae (e.g., "ROE = Net Income / Shareholder Equity")
   - Market relationships (e.g., "Interest rates affect bond prices inversely")
   - Economic theories and domain expertise
 - **Quantitative Data**: Historical time-series data with noise:
@@ -262,7 +264,7 @@ Causalif works with any LangChain-compatible LLM. AWS Bedrock is recommended:
 from langchain_aws import ChatBedrock
 
 model = ChatBedrock(
-    model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+    model_id="<model id>",
     region_name="us-east-1",
     model_kwargs={
         "temperature": 0.0,  # Deterministic for causal reasoning
@@ -327,7 +329,7 @@ df = pd.DataFrame({
 
 # 2. Initialize LLM
 model = ChatBedrock(
-    model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+    model_id="<model id>",
     model_kwargs={"temperature": 0.0}
 )
 
