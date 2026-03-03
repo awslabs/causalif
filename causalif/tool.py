@@ -18,10 +18,11 @@ from .prompts import format_causal_graph_for_llm, generate_llm_interpretation
 _global_causalif_engine = None
 
 
-def set_causalif_engine(model, retriever_tool=None, dataframe=None, max_degrees: int = None, max_parallel_queries: int = 50,
+def set_causalif_engine(model, retriever_tool=None, dataframe=None, k_documents: int = None, max_doc_chars: int = None, 
+                    max_degrees: int = None, max_parallel_queries: int = None,
                     excluded_target_columns: List[str] = None, excluded_related_columns: List[str] = None,
                     related_factors: List[str] = None, selected_dataframe_columns: List[str] = None,
-                    enable_causal_estimate: bool = None):
+                    enable_causal_estimate: bool = None, domains: List[str] = None):
     """
     Set the global CausalIF engine instance with Bayesian causal inference.
     
@@ -29,6 +30,8 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, max_degrees:
         model: LLM model for CausalIF queries
         retriever_tool: RAG retriever for document knowledge
         dataframe: Observational data for Bayesian inference
+        k_documents: Number of documents to use per variable pair (default: 10, as per LACR paper)
+        max_doc_chars: Maximum characters to use from each document (default: 2000, ~400-500 tokens)
         max_degrees: Maximum degrees of separation (None = no filtering, shows entire graph)
         max_parallel_queries: Maximum parallel LLM queries
         excluded_target_columns: List of column names to exclude from target factor selection
@@ -37,6 +40,7 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, max_degrees:
         selected_dataframe_columns: List of specific column names to select from dataframe (None = use all columns)
                                     This will filter the dataframe AND be used for factor list
         enable_causal_estimate: If True, fit CPDs and enable causal inference methods (default: False)
+        domains: List of domain names for context (default: ['supply_chain', 'logistics', 'operations', 'performance_metrics'])
     """
     global _global_causalif_engine
     
@@ -78,21 +82,27 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, max_degrees:
     # Remove duplicates while preserving order
     combined_related_factors = list(dict.fromkeys(combined_related_factors))
     
+    # Set default domains if not provided
+    #if domains is None:
+    #    domains = ['supply_chain', 'logistics', 'operations', 'performance_metrics']
+    
     _global_causalif_engine = CausalIFEngine(
         model=model,
         retriever_tool=retriever_tool,
         dataframe=filtered_dataframe,  # Use filtered dataframe
-        k_documents=3,
+        k_documents=k_documents,
+        max_doc_chars=max_doc_chars,
         max_degrees=max_degrees,
         max_parallel_queries=max_parallel_queries,
         excluded_target_columns=excluded_target_columns,
         excluded_related_columns=excluded_related_columns,
         related_factors=combined_related_factors,
         selected_dataframe_columns=selected_dataframe_columns,
-        enable_causal_estimate=enable_causal_estimate  # NEW
+        enable_causal_estimate=enable_causal_estimate,
+        domains=domains
     )
     print(f"CausalIF engine configured with Bayesian causal inference")
-    print(f"max_degrees={max_degrees if max_degrees is not None else 'None (no filtering)'}, max_parallel_queries={max_parallel_queries}")
+    print(f"k_documents={k_documents}, max_doc_chars={max_doc_chars}, max_degrees={max_degrees if max_degrees is not None else 'None (no filtering)'}, max_parallel_queries={max_parallel_queries}")
     print(f"Causal inference: {'ENABLED ✓' if enable_causal_estimate else 'DISABLED (use enable_causal_estimate=True to enable)'}")
     print(f"RAG retriever available: {retriever_tool is not None}")
     print(f"Dataframe available: {filtered_dataframe is not None}")
@@ -108,12 +118,14 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, max_degrees:
     if combined_related_factors:
         print(f"Related factors for CausalIF 1 analysis: {len(combined_related_factors)} factors")
         print(f"  (includes {len(related_factors) if related_factors else 0} provided + {len(dataframe_columns_to_use)} from dataframe)")
+    if domains:
+        print(f"Domains: {domains}")
 
 
 
 def extract_factors_from_query(query: str, available_columns: List[str], 
                               excluded_target_columns: List[str] = None,
-                              excluded_related_columns: List[str] = None) -> Tuple[str, List[str]]:
+                              excluded_related_columns: List[str] = None) -> str:
     """
     Extract target factor and related factors from query.
     
@@ -128,29 +140,17 @@ def extract_factors_from_query(query: str, available_columns: List[str],
     """
     
     # Default exclusions if not provided
-    if excluded_target_columns is None:
-        # Columns to exclude from target factor selection (dimensional/grouping columns)
-        excluded_target_columns = ['week', 'country', 'destination_country', 'station', 'node', 
-                                   'dow', 'date', 'sub_wk', 'rep_wk', 'plan_type']
+    EXCLUDED_COLUMNS = set(col.lower() for col in excluded_target_columns) if excluded_target_columns else set()
+    EXCLUDED_RELATED_FACTORS = set(col.lower() for col in excluded_related_columns) if excluded_related_columns else set()
     
-    if excluded_related_columns is None:
-        # Columns to exclude from related factors (can participate as causal factors but not as target)
-        # Excludes temporal and geographic dimensions
-        excluded_related_columns = ['country', 'destination_country', 'station', 'node', 
-                                    'date', 'week', 'dow', 'sub_wk', 'rep_wk', 'plan_type']
-    
-    # Convert to sets for faster lookup
-    EXCLUDED_COLUMNS = set(col.lower() for col in excluded_target_columns)
-    EXCLUDED_RELATED_FACTORS = set(col.lower() for col in excluded_related_columns)
-    
-    # Old patterns (commented out)
+    # Patterns with optional context support (e.g., "revenue in pva")
     patterns = [
-         r"why (?:is|are) ([\w_]+) (?:so )?(?:low|high|poor|bad|good)",
-         r"what (?:causes|affects|influences) ([\w_]+)",
-         r"([\w_]+) (?:is|are) (?:too )?(?:low|high)",
-         r"analyze (?:the )?(?:causes (?:of|for) )?([\w_]+)",
-         r"dependencies (?:of|for) ([\w_]+)",
-         r"factors (?:affecting|influencing) ([\w_]+)"
+         r"why (?:is|are) ([\w_]+) (?:so )?(?:low|high|poor|bad|good)(?: in ([\w_]+))?",
+         r"what (?:causes|affects|influences) ([\w_]+)(?: in ([\w_]+))?",
+         r"([\w_]+) (?:is|are) (?:too )?(?:low|high)(?: in ([\w_]+))?",
+         r"analyze (?:the )?(?:causes (?:of|for) )?([\w_]+)(?: in ([\w_]+))?",
+         r"dependencies (?:of|for) ([\w_]+)(?: in ([\w_]+))?",
+         r"factors (?:affecting|influencing) ([\w_]+)(?: in ([\w_]+))?"
     ]
 
     query_lower = query.lower()
@@ -172,29 +172,28 @@ def extract_factors_from_query(query: str, available_columns: List[str],
     
     # If exact match found, skip pattern matching
     if target_factor:
-        related_factors = [col for col in available_columns 
-                          if col != target_factor and col.lower() not in EXCLUDED_RELATED_FACTORS][:12]
-        return target_factor, related_factors
+        return target_factor
 
     # STEP 2: Pattern matching (if no exact match)
-    import re
-    for pattern in patterns:
-        match = re.search(pattern, query_lower)
-        if match:
-            # Extract metric and context from capture groups
-            groups = match.groups()
-            # Filter out None values from groups
-            non_none_groups = [g for g in groups if g is not None]
-            
-            if len(non_none_groups) >= 2:
-                # Pattern with context (e.g., "intake in pva")
-                target_factor = non_none_groups[0]
-                context = non_none_groups[1]
-            elif len(non_none_groups) == 1:
-                # Pattern without context (e.g., "ftg")
-                target_factor = non_none_groups[0]
-                context = None
-            break
+    if target_factor is None:
+        import re
+        for pattern in patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                # Extract metric and context from capture groups
+                groups = match.groups()
+                # Filter out None values from groups
+                non_none_groups = [g for g in groups if g is not None]
+                
+                if len(non_none_groups) >= 2:
+                    # Pattern with context (e.g., "intake in pva")
+                    target_factor = non_none_groups[0]
+                    context = non_none_groups[1]
+                elif len(non_none_groups) == 1:
+                    # Pattern without context (e.g., "ftg")
+                    target_factor = non_none_groups[0]
+                    context = None
+                break
     
     # If target_factor was extracted but doesn't exist in available_columns,
     # try to find a matching column based on metric and context
@@ -234,31 +233,15 @@ def extract_factors_from_query(query: str, available_columns: List[str],
             print(f"Warning: Extracted '{target_factor}{context_str}' not found in dataframe columns")
             target_factor = None
         
+    # If no target_factor found after all attempts, fail the analysis
     if not target_factor:
-        # Exclude dimensional columns from fallback search
-        for col in available_columns:
-            if col.lower() in query_lower and col.lower() not in EXCLUDED_COLUMNS:
-                target_factor = col
-                break
-            
-    if not target_factor:
-        metric_terms = ['intake', 'volume', 'attainment', 'buffer', 'new_intake', 'performance', 'efficiency', 'total', 'ftg']
-        for term in metric_terms:
-            for col in available_columns:
-                if term in col.lower() and col.lower() not in EXCLUDED_COLUMNS:
-                    target_factor = col
-                    break
-            if target_factor:
-                break
-            
-    if not target_factor:
-        # Last resort: pick first non-excluded column
-        non_excluded_cols = [col for col in available_columns if col.lower() not in EXCLUDED_COLUMNS]
-        target_factor = non_excluded_cols[0] if non_excluded_cols else (available_columns[0] if available_columns else "ftg")
+        raise ValueError(
+            f"Could not identify target factor from query: '{query}'. "
+            f"Please specify a valid column name from the backgroud data or supplied dataframe. "
+            f"Available columns: {', '.join(available_columns[:10])}{'...' if len(available_columns) > 10 else ''}"
+        )
 
-    related_factors = [col for col in available_columns 
-                      if col != target_factor and col.lower() not in EXCLUDED_RELATED_FACTORS][:12]
-    return target_factor, related_factors
+    return target_factor
 
 
 
@@ -289,15 +272,9 @@ def causalif(query: str) -> Dict:
         global _global_causalif_engine
         
         if _global_causalif_engine is None:
-            print("Warning: No CausalIF engine configured. Creating default engine...")
-            _global_causalif_engine = CausalIFEngine(
-                model=None,
-                retriever_tool=None,
-                dataframe=pd.DataFrame({'ftg': [1, 2, 3], 'week': [30, 31, 32], 'country': ['AT', 'DE', 'FR']}),
-                k_documents=3,
-                max_degrees=3,
-                max_parallel_queries=50
-            )
+            print("Warning: No CausalIF engine configured. Raising error")
+            raise ValueError(
+                f"❌ CausalIF Analysis Failed: {str(e)} \n")
         
         causalif_engine = _global_causalif_engine
         max_degrees = causalif_engine.max_degrees
@@ -332,18 +309,16 @@ def causalif(query: str) -> Dict:
         combined_factors = list(dict.fromkeys(combined_factors))
 
         # Extract target factor from query using the combined list
-        target_factor, _ = extract_factors_from_query(
+        #target_factor, _ = extract_factors_from_query(
+        target_factor = extract_factors_from_query(
             query, 
             combined_factors,  # Use combined list instead of just available_columns
             excluded_target_columns=causalif_engine.excluded_target_columns,
             excluded_related_columns=causalif_engine.excluded_related_columns
         )
         
-        # For CausalIF 1 analysis, use all factors from combined list except target
-        analysis_factors_all = [f for f in combined_factors if f != target_factor]
-        
-        # Remove duplicates
-        analysis_factors_all = list(dict.fromkeys(analysis_factors_all))
+        # For CausalIF 1 analysis, use all factors from combined list except target (remove duplicates)
+        analysis_factors_all = list(dict.fromkeys([f for f in combined_factors if f != target_factor]))
         
         print(f"Target factor: {target_factor}")
         print(f"Analysis factors for CausalIF 1: {len(analysis_factors_all)} factors")
@@ -356,9 +331,10 @@ def causalif(query: str) -> Dict:
         
         # Use combined factors for CausalIF 1 analysis
         analysis_factors = [target_factor] + analysis_factors_all
-        domains = ['supply_chain', 'logistics', 'operations', 'performance_metrics']
+        domains = causalif_engine.domains
         
         print(f"\nRunning CausalIF analysis on {len(analysis_factors)} total factors")
+        print(f"Domains: {domains}")
         
         skeleton_graph, causal_graph = causalif_engine.run_complete_causalif(analysis_factors, domains, target_factor)
         
@@ -636,8 +612,6 @@ def causalif(query: str) -> Dict:
             'success': False
         }
 
-
-
 @tool
 def causalif_tool(query: str) -> Dict:
     """
@@ -663,41 +637,6 @@ def causalif_tool(query: str) -> Dict:
         # Intelligent dataframe selection based on query content
         query_lower = query.lower()
         
-        # Check for 'ftg' first - merge df_ftg and df_pva
-        if 'ftg' in query_lower:
-            print(f"Query mentions FTG - merging df_ftg and df_pva")
-            # Merge df_ftg and df_pva with all columns from both
-            if df_module.df_ftg is not None and df_module.df_pva is not None:
-                # Find common columns for merging (likely 'week', 'jurisdiction', 'country', etc.)
-                common_cols = list(set(df_module.df_ftg.columns) & set(df_module.df_pva.columns))
-                if common_cols:
-                    print(f"Merging on common columns: {common_cols}")
-                    dataframe_to_use = pd.merge(
-                        df_module.df_ftg, 
-                        df_module.df_pva, 
-                        on=common_cols, 
-                        how='outer',
-                        suffixes=('_ftg', '_pva')
-                    )
-                    print(f"Merged dataframe shape: {dataframe_to_use.shape}")
-                else:
-                    # No common columns, concatenate side by side
-                    print("No common columns found, concatenating dataframes")
-                    dataframe_to_use = pd.concat([df_module.df_ftg, df_module.df_pva], axis=1)
-            else:
-                print("Warning: df_ftg or df_pva is None, falling back to df_pva")
-                dataframe_to_use = df_module.df_pva
-        
-        # Check for 'uvp' mention
-        elif 'uvp' in query_lower:
-            print(f"Query mentions UVP - using df_uvp")
-            dataframe_to_use = df_module.df_uvp if df_module.df_uvp is not None else df_module.df_pva
-        
-        # Default case: use df_pva
-        else:
-            print(f"Default case - using df_pva")
-            dataframe_to_use = df_module.df_pva if df_module.df_pva is not None else df_module.df_uvp
-        
         # Verify dataframe is not None
         if dataframe_to_use is None:
             print("Warning: Selected dataframe is None, POSTERIOR will not be computed")
@@ -708,10 +647,6 @@ def causalif_tool(query: str) -> Dict:
         result = causalif(query)
         fig = visualize_causalif_results(result)
         if fig:
-            # Store visualization in session state to persist across reruns
-            if 'causalif_visualizations' not in st.session_state:
-                st.session_state.causalif_visualizations = []
-            
             # Add timestamp and query info to the visualization
             import datetime
             viz_data = {
@@ -720,30 +655,6 @@ def causalif_tool(query: str) -> Dict:
                 'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'target_factor': result.get('target_factor', 'Unknown')
             }
-            st.session_state.causalif_visualizations.append(viz_data)
-            
-            # Display all stored visualizations
-            st.markdown("---")
-            
-            # Header with clear button
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown("### 📊 CausalIF Analysis History")
-            with col2:
-                if st.button("🗑️ Clear History", key="clear_causalif_history"):
-                    st.session_state.causalif_visualizations = []
-                    st.rerun()
-            
-            # Display visualizations
-            if st.session_state.causalif_visualizations:
-                for i, viz in enumerate(st.session_state.causalif_visualizations, 1):
-                    with st.expander(f"Analysis {i}: {viz['target_factor']} ({viz['timestamp']})", expanded=(i == len(st.session_state.causalif_visualizations))):
-                        st.markdown(f"**Query:** {viz['query']}")
-                        st.plotly_chart(viz['figure'], use_container_width=True, key=f"causalif_viz_{i}_{viz['timestamp']}")
-            else:
-                st.info("No CausalIF analyses in history. Run a query to see visualizations here.")
-            
-            st.markdown("---")
 
         return {
             "summary": result['summary']

@@ -1,0 +1,2 @@
+[console_scripts]
+causalif = causalif.tools:causalif_tool

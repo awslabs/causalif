@@ -26,6 +26,161 @@ class CausalIFPrompts:
         4. If there is no evidence to clarify the association relationship between A and B, then it is unknown."""
     
     @staticmethod
+    def association_type_context() -> str:
+        """
+        Return context explaining direct vs indirect association for LACR 1 algorithm.
+        
+        This context is used in Step 3 (Association Type Verifier) of the 4-step
+        constraint-based causal (CC) prompt strategy from the paper.
+        
+        Reference: Section 3.2.1 of "Causal Graph Discovery with Retrieval-Augmented 
+        Generation based Large Language Models" (https://arxiv.org/html/2402.15301v2)
+        
+        Returns:
+            str: Context text explaining direct association, indirect association, and unknown
+        """
+        return """The association relationship between two factors A and B can be direct or indirect:
+
+1. Direct Association: A and B are associated, and this association cannot be eliminated by controlling for (conditioning on) any other variables in the given factor set. In causal terms, A and B cannot be d-separated by any subset of the other variables.
+
+2. Indirect Association: A and B are associated, but this association can be eliminated by controlling for (conditioning on) some intermediary variables. These intermediary variables mediate the relationship between A and B.
+
+3. If you cannot determine whether the association is direct or indirect based on available evidence, it is unknown."""
+    
+    @staticmethod
+    def association_type_verifier(
+        factor_a: str,
+        factor_b: str,
+        factors: List[str],
+        domains: List[str],
+        document_content: str
+    ) -> str:
+        """
+        Generate prompt for Step 3 (Association Type Verifier) with document.
+        
+        This method implements Step 3 of the 4-step constraint-based causal (CC) prompt
+        strategy from the paper. It determines whether the association between two factors
+        is direct or indirect based on document evidence.
+        
+        Reference: Section 3.2.1, Algorithm 1 (LACR 1) of "Causal Graph Discovery with 
+        Retrieval-Augmented Generation based Large Language Models" 
+        (https://arxiv.org/html/2402.15301v2)
+        
+        Args:
+            factor_a: First factor in the pair being analyzed
+            factor_b: Second factor in the pair being analyzed
+            factors: Complete list of all factors in the variable set V
+            domains: List of domain names for context
+            document_content: Retrieved document content for evidence
+            
+        Returns:
+            str: Formatted prompt for association type verification with document
+            
+        Expected Response Format:
+            Thoughts: [Analysis of the question]
+            Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
+            Intermediary Factors: [List if (E), otherwise "None"]
+            Reference: [Supporting sentence from document, skip if (C)]
+        """
+        # Get background reminder
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        
+        # Get association type context
+        context = CausalIFPrompts.association_type_context()
+        
+        # Build list of available factors for mediation (exclude factor_a and factor_b)
+        available_factors = [f for f in factors if f not in [factor_a, factor_b]]
+        available_factors_str = ', '.join(available_factors) if available_factors else "None"
+        
+        # Build the prompt
+        prompt = f"""{background}
+
+Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', determine whether the association between the pair of 'Main factors' is direct or indirect according to the 'Association Type Context'.
+
+Document: {document_content}
+
+Main factors: {factor_a} and {factor_b}
+
+Available factors for mediation: {available_factors_str}
+
+Association Type Context:
+{context}
+
+Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?
+
+Expected Response Format:
+Thoughts: [Write your thoughts on the question]
+Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
+Intermediary Factors: [If you chose (E), list the intermediary factors that mediate the relationship. Otherwise, write "None"]
+Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]"""
+        
+        return prompt
+    
+    @staticmethod
+    def association_type_verifier_bg(
+        factor_a: str,
+        factor_b: str,
+        factors: List[str],
+        domains: List[str]
+    ) -> str:
+        """
+        Generate prompt for Step 3 (Association Type Verifier) with background knowledge.
+        
+        This method implements Step 3 of the 4-step constraint-based causal (CC) prompt
+        strategy from the paper. It determines whether the association between two factors
+        is direct or indirect based on the LLM's background knowledge (training data).
+        
+        Reference: Section 3.2.1, Algorithm 1 (LACR 1) of "Causal Graph Discovery with 
+        Retrieval-Augmented Generation based Large Language Models" 
+        (https://arxiv.org/html/2402.15301v2)
+        
+        Args:
+            factor_a: First factor in the pair being analyzed
+            factor_b: Second factor in the pair being analyzed
+            factors: Complete list of all factors in the variable set V
+            domains: List of domain names for context
+            
+        Returns:
+            str: Formatted prompt for association type verification with background knowledge
+            
+        Expected Response Format:
+            Thoughts: [Analysis of the question]
+            Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
+            Intermediary Factors: [List if (E), otherwise "None"]
+        """
+        # Get background reminder
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        
+        # Get association type context
+        context = CausalIFPrompts.association_type_context()
+        
+        # Build list of available factors for mediation (exclude factor_a and factor_b)
+        available_factors = [f for f in factors if f not in [factor_a, factor_b]]
+        available_factors_str = ', '.join(available_factors) if available_factors else "None"
+        
+        # Build the prompt
+        prompt = f"""{background}
+
+Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge, determine whether the association between the pair of 'Main factors' is direct or indirect according to the 'Association Type Context'.
+
+Main factors: {factor_a} and {factor_b}
+
+Available factors for mediation: {available_factors_str}
+
+Association Type Context:
+{context}
+
+Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?
+
+Expected Response Format:
+Thoughts: [Write your thoughts on the question]
+Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
+Intermediary Factors: [If you chose (E), list the intermediary factors that mediate the relationship. Otherwise, write "None"]"""
+        
+        return prompt
+
+    
+    @staticmethod
     def interpretation_prompt(
         original_query: str,
         target_factor: str,

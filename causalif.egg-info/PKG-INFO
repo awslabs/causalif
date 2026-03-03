@@ -1,3 +1,57 @@
+Metadata-Version: 2.4
+Name: causalif
+Version: 0.1.9.5
+Summary: Large Language Models (LLMs) with Bayesian causal inference to discover causal relationships and associations from observational data and domain knowledge
+Home-page: https://github.com/awslabs/causalif
+Author: Subhro Bose
+Author-email: bossubhr@amazon.co.uk
+Project-URL: Bug Reports, https://github.com/awslabs/causalif/issues
+Project-URL: Source, https://github.com/awslabs/causalif
+Project-URL: Documentation, https://github.com/awslabs/causalif/blob/main/README.md
+Keywords: causal reasoning,machine learning,nlp,rag,jax,networkx,causal inference,genai,llm
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Scientific/Engineering :: Information Analysis
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+License-File: NOTICE
+Requires-Dist: pandas>=1.3.0
+Requires-Dist: networkx>=2.6.0
+Requires-Dist: plotly>=5.0.0
+Requires-Dist: langchain-core>=0.1.0
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: pgmpy>=0.1.23
+Requires-Dist: hypothesis>=6.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=6.0; extra == "dev"
+Requires-Dist: pytest-cov>=2.0; extra == "dev"
+Requires-Dist: black>=21.0; extra == "dev"
+Requires-Dist: flake8>=3.8; extra == "dev"
+Requires-Dist: mypy>=0.800; extra == "dev"
+Provides-Extra: jupyter
+Requires-Dist: nest-asyncio>=1.5.0; extra == "jupyter"
+Requires-Dist: jupyter>=1.0.0; extra == "jupyter"
+Requires-Dist: ipywidgets>=7.0.0; extra == "jupyter"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: project-url
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
 # Causal Inference Framework for AWS (causalif)
 
 [![PyPI version](https://badge.fury.io/py/causalif.svg)](https://pypi.org/project/causalif/)
