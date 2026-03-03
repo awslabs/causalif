@@ -32,7 +32,7 @@ Best used as a tool in agentic systems for interpreting causal relationships.
 
 **GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif) | **PyPI**: [causalif](https://pypi.org/project/causalif/)
 
-The association algorithm (causalif 1) is Inspired by LACR 1 algorithm: https://arxiv.org/html/2402.15301v2
+The direct, indirect and independent association algorithm (causalif_1_edge_existence_verification) is inspired by LACR 1 algorithm: https://arxiv.org/html/2402.15301v2
 
 Note: It is an experimental project which is dependent on quality RAG documents, model knowledge and data size for its analysis.
 ---
