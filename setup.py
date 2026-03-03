@@ -49,7 +49,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "causalif=causalif.tools:causalif_tool",
+            "causalif=causalif.tool:causalif_tool",
         ],
     },
     keywords="causal reasoning, machine learning, nlp, rag, jax, networkx, causal inference, genai, llm",
