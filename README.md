@@ -22,276 +22,120 @@
 
 ## Overview
 
-Causalif, an experimental project, combines Large Language Models (LLMs) with hill climb algorithm and causal inference from pgmpy library to discover causal relationships and associations from observational data and domain knowledge. Unlike traditional causal discovery algorithms that rely solely on statistical patterns, Causalif leverages:
+CausalIF combines LLMs with Bayesian causal inference to discover causal relationships from both qualitative documents and quantitative data. It leverages:
 
-- **Background Knowledge**: LLM's pre-trained knowledge about causal relationships
-- **Document Knowledge**: Domain-specific documents retrieved via RAG
-- **Statistical Evidence**: Correlation patterns from observational data
-- **Bayesian Structure Learning**: Data-driven causal graph orientation
+- **Background Knowledge**: LLM's pre-trained causal understanding
+- **Document Knowledge**: Domain documents via RAG retrieval
+- **Bayesian Structure Learning**: Hill Climbing + BDeu scoring for causal orientation
 
-This hybrid approach enables causal discovery and associations when the use case seeks to understand from qualitative data what possible associations of a target factor could be present and then which factors in the data are influencing corresponding factors. 
+Best used as a tool in agentic systems for interpreting causal relationships.
 
-Note: LLM interpretation of causalif is best realised when this library is used as a tool in agentic systems.
+**GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif) | **PyPI**: [causalif](https://pypi.org/project/causalif/)
 
-**GitHub**: [awslabs/causalif](https://github.com/awslabs/causalif)  
-**PyPI**: [causalif](https://pypi.org/project/causalif/) 
+The association algorithm (causalif 1) is Inspired by LACR 1 algorithm: https://arxiv.org/html/2402.15301v2
 
-The direct, indirect and independent relationships have been inspired from the LACR 1 algorithm in paper: https://arxiv.org/html/2402.15301v2
-
+Note: It is an experimental project which is dependent on quality RAG documents, model knowledge and data size for its analysis.
 ---
 
 ## Ideal Use Cases
 
-Causalif is particularly powerful when you have both qualitative domain knowledge and quantitative observational data. It is ideal to be integrated as a tool to agentic workflows so that the agent can interpret its results and provides an overall response to the user.
+CausalIF works best when you have both qualitative domain knowledge and quantitative observational data.
 
-1. **Qualitative Knowledge**: Documents containing formulae, relationships, and domain expertise
-2. **Quantitative Data**: Noisy observational data that fuels those formulae
+**What You Need**:
+1. **Qualitative**: Documents with formulae, relationships, and domain expertise
+2. **Quantitative**: Observational data (even if noisy)
 
-### Example: Financial Analysis
+**Example**: Financial institution analyzing derived metrics using research papers + historical market data.
 
-**Scenario**: A financial institution wants to understand what drives the behavior of derived financial metrics.
+**When to Use**:
+✅ Rich document corpus + observational data  
+✅ Understanding derived metrics  
+✅ "What causes what" questions  
 
-**What They Have**:
-- **Qualitative Finance Data**: Research papers, financial articles, analyst reports, and documents describing:
-  - Derived formulae (e.g., "ROE = Net Income / Shareholder Equity")
-  - Market relationships (e.g., "Interest rates affect bond prices inversely")
-  - Economic theories and domain expertise
-- **Quantitative Data**: Historical time-series data with noise:
-  - Stock prices, trading volumes, interest rates
-  - Company financials (revenue, earnings, debt ratios)
-  - Market indicators (VIX, sector indices)
-
-**What They Want to Discover**:
-- Which factors causally drive a target metric (e.g., "Factors influencing volatility in Commodities?").
-- Why any derived factors is low or high around a specific time period.
--What is causing a target factor to behave differently and what are influencing the target factor.
-
-
-### Key Advantages for use Cases
-
-1. **Handles Noisy Data**: Bayesian approach robust to measurement error and missing values
-2. **Leverages Domain Knowledge**: RAG retrieval incorporates expert knowledge from documents
-3. **Discovers Hidden Relationships**: Finds causal links not obvious from data alone
-4. **Quantifies Effects**: Provides effect sizes, not just "yes/no" causality
-5. **Validates with Multiple Sources**: Voting mechanism across LLM, documents, and data reduces false discoveries
-
-### When Causalif is Most Effective
-
-✅ **Use Causalif when you have**:
-- Rich document corpus with domain knowledge and formulas
-- Observational data (even if noisy or limited)
-- Derived metrics whose dependencies are unclear
-- Need to understand "what causes what" not just "what correlates"
-
-⚠️ **Consider alternatives when**:
-- You have no domain documents (pure data-driven methods may suffice)
-- You need real-time causal discovery (Causalif requires LLM calls)
-- Your data has <10 samples (insufficient for Bayesian structure learning)
-- Relationships are purely experimental (randomized controlled trials are better)
+**When Not to Use**:
+⚠️ No domain documents  
+⚠️ Real-time requirements  
+⚠️ <10 data samples  
+⚠️ Purely experimental data (use RCTs)
 
 ---
 
 ## Logical Flow
 
-Causalif implements a two-stage algorithm with parallel processing and RAG integration:
-
-### Architecture Diagram
+CausalIF implements a 3-stage algorithm:
 
 ![Library Architecture](docs/causalif_flow_arch.png)
 
-Causalif implements a three-stage algorithm:
+### Stage 1: Edge Existence (CausalIF 1)
 
-### Stage 1: Edge Existence Verification (Causalif 1)
+**Goal**: Identify direct causal associations
 
-**Goal**: Determine which pairs of variables are causally related
+**5 Phases**:
+1. **Document Retrieval**: Get k_documents from RAG per edge
+2. **Association Verification**: LLM votes (1 BG + k DOC votes per edge) → Associated/Independent/Unknown
+3. **Type Classification**: Direct/Indirect/Unknown for associated edges
+4. **Rechecker**: Validate intermediaries are in variable set V; reclassify if not
+5. **Vote Scoring**: Direct: +1, Indirect/Independent: -1, Unknown: 0 → Keep if S > 0
 
-**Process**:
-1. **Initialize**: Start with a complete undirected graph (all possible edges between variables)
-2. **Knowledge Base Assembly**: For each variable pair (A, B):
-   - Query LLM's background knowledge
-   - Retrieve relevant documents via RAG
-   - Extract statistical evidence from data
-3. **Voting Mechanism**: Each knowledge base votes on edge existence:
-   - `+1`: Variables are associated (edge should exist)
-   - `-1`: Variables are independent (edge should be removed)
-   - `0`: Unknown (no vote)
-4. **Edge Removal**: Remove edges where total vote score ≤ 0
-5. **Output**: Skeleton graph (undirected graph of causal relationships)
+**Output**: Skeleton graph with only direct associations
 
-**Parallel Optimization**: Causalif batches LLM queries for multiple variable pairs, executing them in parallel (configurable up to 50 concurrent queries) for significant speedup.
+### Stage 2: Causal Orientation (CausalIF 2)
 
-### Stage 2: Causal Orientation (Causalif 2)
+**Goal**: Determine causal direction (A → B or B ← A)
 
-**Goal**: Determine the direction of causal relationships (A → B or B ← A)
+**Process**: Hill Climbing + BDeu scoring constrained by skeleton graph
 
-**Process**:
-1. **Input**: Skeleton graph from Stage 1
-2. **Bayesian Structure Learning**: 
-   - Use Hill Climbing search with BDeu scoring
-   - Constrain search to edges in skeleton (prior knowledge)
-   - Weight edges by LLM confidence from Stage 1
-3. **Direction Determination**: For each edge in skeleton:
-   - Compute Bayesian posterior: P(G | Data, Priors) ∝ P(Data | G) × P(G | Priors)
-   - Select direction that maximizes posterior probability
-4. **Output**: Directed Acyclic Graph (DAG) representing causal relationships
-
-**Degree-Limited Analysis**: Optionally focus on relationships within N degrees of separation from a target variable for faster analysis.
+**Output**: Directed Acyclic Graph (DAG)
 
 ### Stage 3: Causal Inference (Optional)
 
-**Goal**: Quantify causal effects and enable interventional queries
+**Goal**: Quantify causal effects
 
-**Process**:
-1. **Input**: Causal DAG from Stage 2 + Observational data
-2. **Fit CPDs**: Learn Conditional Probability Distributions using Maximum Likelihood Estimation
-3. **Create Bayesian Network**: Combine structure (DAG) with parameters (CPDs)
-4. **Estimate Effects**: Compute Average Treatment Effects (ATE) for each cause
-5. **Enable Queries**: Support interventional queries P(Y | do(X))
-6. **Output**: Quantitative causal model with effect sizes
+**Process**: Fit CPDs → Compute Average Treatment Effects → Enable interventional queries
 
-**When to Enable**:
-- Need effect sizes ("how much does X affect Y?")
-- Want to simulate interventions ("what if we change X?")
-- Need to identify confounders and adjustment sets
-- Require quantitative prioritization of causes
-
-**Note**: This stage is optional and disabled by default. Enable with `enable_causal_inference=True` parameter.
+**Enable with**: `enable_causal_estimate=True`
 
 ---
 
 ## Why Hill Climb and BDeu Score?
 
-### Why Hill Climbing?
+### Hill Climbing
+Local search algorithm that iteratively improves graph structure. Advantages: incorporates prior knowledge, computationally efficient (10-20 variables), interpretable steps.
 
-**Hill Climbing** is a local search algorithm that iteratively improves a causal graph structure by:
-- Starting from an initial graph (skeleton from Stage 1)
-- Testing local modifications (add/remove/reverse edges)
-- Accepting changes that improve the score
-- Stopping at a local optimum
+### BDeu Score
+Bayesian scoring function measuring how well a graph explains data. Advantages: combines priors with data, score equivalence, built-in regularization.
 
-**Advantages for Causalif**:
-1. **Constraint Compatibility**: Easily incorporates prior knowledge (skeleton graph) as hard constraints
-2. **Computational Efficiency**: Scales to moderate-sized graphs (10-20 variables) with reasonable runtime
-3. **Interpretability**: Local search steps are traceable and explainable
-4. **Flexibility**: Supports custom scoring functions (like Prior-Weighted BDeu)
+**CausalIF Enhancement**: `Score(G) = BDeu(G | Data) + λ × Prior(G | LLM)`
 
-**Alternatives Considered**:
-- **PC Algorithm**: Constraint-based, but doesn't naturally incorporate LLM priors
-- **GES (Greedy Equivalence Search)**: Similar to Hill Climb but more complex
-- **Exact Search**: Computationally prohibitive for >5 variables
-- **MCMC Sampling**: More accurate but much slower; overkill for typical use cases
-
-### Why BDeu Score?
-
-**BDeu (Bayesian Dirichlet equivalent uniform)** is a Bayesian scoring function that measures how well a causal graph explains the observed data.
-
-**Mathematical Foundation**:
-```
-BDeu(G, D) = P(D | G) = ∏ᵢ ∏ⱼ [Γ(α) / Γ(α + Nᵢⱼ)] × ∏ₖ [Γ(αₖ + Nᵢⱼₖ) / Γ(αₖ)]
-```
-Where:
-- `G`: Causal graph structure
-- `D`: Observational data
-- `α`: Equivalent sample size (prior strength)
-- `Nᵢⱼₖ`: Count of observations in configuration
-
-**Advantages for Causalif**:
-1. **Bayesian Framework**: Naturally combines prior knowledge (LLM) with data evidence
-2. **Score Equivalence**: Assigns same score to equivalent graph structures (Markov equivalence)
-3. **Regularization**: Built-in penalty for complex graphs (Occam's razor)
-4. **Theoretical Soundness**: Proven consistency properties as data grows
-
-**Causalif Enhancement - Prior-Weighted BDeu**:
-```python
-Score(G) = BDeu(G | Data) + λ × Prior(G | LLM)
-```
-Where:
-- `BDeu(G | Data)`: Standard BDeu score from data
-- `Prior(G | LLM)`: LLM confidence scores from Stage 1
-- `λ`: Weight parameter balancing data vs. prior
-
-This implements true Bayesian inference: **P(G | Data, LLM) ∝ P(Data | G) × P(G | LLM)**
-
-**Alternatives Considered**:
-- **BIC (Bayesian Information Criterion)**: Simpler but less theoretically principled
-- **AIC (Akaike Information Criterion)**: Doesn't incorporate priors naturally
-- **K2 Score**: Similar to BDeu but requires variable ordering
-- **MIT Score**: More complex, no clear advantage for this use case
+Implements Bayesian inference: **P(G | Data, LLM) ∝ P(Data | G) × P(G | LLM)**
 
 ---
 
 ## Prerequisites
 
-### 1. AWS Bedrock Knowledge Base
+1. **AWS Bedrock Knowledge Base**: [Setup guide](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-create.html)
+2. **LLM Model**: Any LangChain-compatible LLM (Bedrock, OpenAI, etc.)
+3. **Observational Data**: Pandas DataFrame with 100+ samples
 
-Causalif requires a RAG knowledge base for document retrieval. Set up an AWS Bedrock Knowledge Base following the [official instructions](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-create.html).
-
-**Recommended Configuration**:
-- **Vector Store**: Amazon OpenSearch Serverless or Amazon Aurora
-- **Embedding Model**: Amazon Titan Embeddings or Cohere Embed
-- **Document Format**: Markdown, PDF, or plain text
-- **Number of Results**: 10-20 documents per query
-
-### 2. Create Retriever Tool
-
-After setting up the knowledge base, create a LangChain retriever tool:
+### Quick Setup
 
 ```python
 from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
-from langchain.tools.retriever import create_retriever_tool
-
-retriever = AmazonKnowledgeBasesRetriever(
-    knowledge_base_id="<your-knowledge-base-id>",
-    retrieval_config={
-        "vectorSearchConfiguration": {
-            "numberOfResults": 20  # Adjust based on your needs
-        }
-    },
-)
-
-retriever_tool = create_retriever_tool(
-    retriever,
-    "domain_knowledge_retriever",
-    "Retrieves domain-specific documents about causal relationships between factors",
-)
-```
-
-### 3. LLM Model
-
-Causalif works with any LangChain-compatible LLM. AWS Bedrock is recommended:
-
-```python
 from langchain_aws import ChatBedrockConverse
 
-model=ChatBedrockConverse(model_id="<model_id>",temperature=0.0,region_name="<region_id>")
+# Retriever
+retriever = AmazonKnowledgeBasesRetriever(
+    knowledge_base_id="your-kb-id",
+    retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 20}}
+)
+
+# LLM
+model = ChatBedrockConverse(
+    model_id="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    temperature=0.0,
+    region_name="us-west-2"
+)
 ```
-
-**Supported Models**:
-- Anthropic Claude (recommended)
-- Amazon Titan
-- Meta Llama
-- Cohere Command
-- Any OpenAI-compatible model
-
-### 4. Observational Data
-
-Provide a pandas DataFrame with observational data:
-
-```python
-import pandas as pd
-
-df = pd.DataFrame({
-    'sleep_hours': [7, 6, 8, 5, 7, 9],
-    'exercise_minutes': [30, 20, 45, 10, 35, 60],
-    'stress_level': [5, 7, 3, 8, 4, 2],
-    'productivity': [8, 6, 9, 4, 7, 10]
-})
-```
-
-**Requirements**:
-- Minimum 100 samples (more is better)
-- Numeric or categorical columns
-- No missing values (or handle them beforehand)
 
 ---
 
@@ -421,76 +265,33 @@ fig.write_image("causal_graph.png")  # Requires kaleido
 
 ## Architecture
 
-### System Integration
-
 ![Library Architecture](docs/overall_design.png)
 
-Causalif integrates with agentic LLM applications as a tool:
+**Layers**: Agent → CausalIF Tool → Engine → Knowledge (RAG + LLM) → Data
 
-1. **Agent Layer**: LangChain agents or custom orchestrators
-2. **Causalif Tool**: Exposes `causalif_tool` for natural language queries
-3. **Engine Layer**: `CausalifEngine` implements core algorithms
-4. **Knowledge Layer**: RAG retriever + LLM background knowledge
-5. **Data Layer**: Pandas DataFrame with observational data
-
-### Component Architecture
-
+**Components**:
 ```
 causalif/
-├── core.py           # Data structures (AssociationResponse, CausalDirection, KnowledgeBase)
-├── engine.py         # CausalifEngine (main algorithm implementation)
-├── prompts.py        # CausalifPrompts (LLM prompt templates)
-├── tools.py          # causalif_tool, set_causalif_engine (LangChain integration)
-├── visualization.py  # visualize_causalif_results (Plotly graphs)
-└── __init__.py       # Public input exports
+├── core.py           # Data structures
+├── engine.py         # CausalIF algorithm
+├── prompts.py        # LLM prompts
+├── tool.py           # API & LangChain integration
+└── visualization.py  # Plotly graphs
 ```
-
-### Key Classes
-
-**CausalifEngine**:
-- `causalif_1_edge_existence_verification()`: Stage 1 algorithm
-- `causalif_2_orientation()`: Stage 2 algorithm
-- `run_complete_causalif()`: End-to-end pipeline
-- `batch_association_queries()`: Parallel LLM queries
-- `batch_causal_direction_queries()`: Parallel direction queries
-- `visualize_graph()`: Visualization
-
-**KnowledgeBase**:
-- `kb_type`: "BG" (background), "DOC" (document)
-- `content`: Knowledge content
-- `source`: Source identifier
 
 ---
 
 ## Limitations
 
-### This method isn't ideal for only quantitative data and feedback loop driven inference. This method is built aiming finding hybrid association and causality among qualitative and quatitative data sets.
+**Not ideal for**: Pure quantitative data or feedback-loop driven inference. Built for hybrid qualitative + quantitative analysis.
 
-### Data & Computational
+**Data**: Min 100 samples recommended, 10-20 variables max without filtering, O(n² × k) complexity
 
-- **Minimum 10 samples** required for Bayesian structure learning (100+ recommended)
-- **Scalability**: Practical limit of 15-20 variables without degree filtering
-- **Time Complexity**: O(n² × k) for n variables and k LLM queries per pair
-- **LLM Costs**: 2-5 LLM calls per variable pair
+**LLM**: May hallucinate, reflects training biases, 2-5 calls per variable pair
 
-**Mitigation**: Use `max_degrees` parameter to focus analysis; increase `max_parallel_queries` for speed.
+**Assumptions**: DAG structure (no cycles), no unmeasured confounders, conditional independence
 
-### LLM & Knowledge
-
-- **Hallucination**: LLM may invent unsupported relationships
-- **Bias**: Reflects training data biases
-- **Consistency**: Results may vary (use `temperature=0` for determinism)
-- **RAG Quality**: Results depend on document corpus quality and retrieval accuracy
-
-**Mitigation**: Validate outputs with domain expertise; use voting across multiple knowledge sources.
-
-### Causal Assumptions
-
-- **Acyclicity**: Assumes DAG structure (no feedback loops)
-- **Causal Sufficiency**: Assumes no unmeasured confounders
-- **Markov Condition**: Assumes conditional independence given parents
-
-**Mitigation**: Include potential confounders in variable set; validate DAG assumption with domain knowledge.
+**Mitigation**: Use `max_degrees` for filtering, `temperature=0` for consistency, validate with domain expertise
 
 ---
 
