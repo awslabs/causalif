@@ -56,7 +56,7 @@ CausalIF works best when you have both qualitative domain knowledge and quantita
 **When Not to Use**:
 ⚠️ No domain documents  
 ⚠️ Real-time requirements  
-⚠️ <10 data samples  
+⚠️ <100 data samples  
 ⚠️ Purely experimental data (use RCTs)
 
 ---
@@ -318,7 +318,7 @@ causalif/
 
 **Not ideal for**: Pure quantitative data or feedback-loop driven inference. Built for hybrid qualitative + quantitative analysis.
 
-**Data**: Min 100 samples recommended, 10-20 variables max without filtering, O(n² × k) complexity
+**Data**: Min 100 samples recommended, 10-20 variables max run at a time, Complexity is O(n² × k)
 
 **LLM**: May hallucinate, reflects training biases, 2-5 calls per variable pair
 
