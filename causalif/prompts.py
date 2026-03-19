@@ -3,7 +3,10 @@
 
 """Prompt templates for CausalIF"""
 
-from typing import List, Dict
+import logging
+from typing import List, Dict, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class CausalIFPrompts:
@@ -17,21 +20,286 @@ class CausalIFPrompts:
     def association_context() -> str:
         return """The association relationship between two factors A and B can be associated or independent, and this association relationship can be clarified by the following principles:
 
-        1. If A and B are statistically associated or correlated, they are associated, otherwise they are independent.
+1. If A and B are statistically associted or correlated, they are associated, otherwise they are independent.
 
-        2. The association relationship can be strongly clarified if there is statistical evidence supporting it.
+2. The association relationship can be strongly clarified if there is statistical evidence supporting it.
 
-        3. If there is no obvious statistical evidence supporting the association relationship between A and B, it can also be clarified if there is any evidence showing that A and B are likely to be associated or independent statistically.
+3. If there is no obvious statistical evidence supporting the association relationship between A and B, it can also be clarified if there is any evidence showing that A and B are likely to be associated or independent statistically.
 
-        4. If there is no evidence to clarify the association relationship between A and B, then it is unknown."""
-    
+4. If there is no evidence to clarify the association relationship between A and B, then it is unknown."""
+
+
+
+
+
+    # ------------------------------------------------------------------
+    # Context-cached prompt helpers: split system context from edge batch
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def bg_association_system_context(
+        factors: List[str],
+        domains: List[str],
+    ) -> str:
+        """Return the system message for BG association verification.
+
+        Based on paper A.3.6: LLM Association Query (with background knowledge).
+        Sent once; edge batches reference it via follow-up human messages
+        built by :meth:`bg_association_edge_batch`.
+        """
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        context = CausalIFPrompts.association_context()
+
+        return f"""{background}
+
+Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge, try to find statistical evidence to clarify the association relationship between each pair of 'Main factors' that will be provided in follow-up messages according to the 'Association Context' (delimited by double dollar signs).
+
+Consider your background knowledge and the association context. Answer the 'Association Question', and write your thoughts. Respond according to the expected format.
+
+Association Context:
+$$
+{context}
+$$
+
+You will receive batches of edge pairs. For each edge, answer the association question using the exact --- Edge N --- delimiters shown."""
+
+    @staticmethod
+    def bg_association_edge_batch(
+        edge_pairs: List[Tuple[str, str]],
+    ) -> str:
+        """Return a human message containing only the BG edge questions."""
+        edge_sections: List[str] = []
+        for idx, (factor_a, factor_b) in enumerate(edge_pairs, 1):
+            edge_sections.append(
+                f"--- Edge {idx} ---\n"
+                f"Main factors: {factor_a} and {factor_b}\n"
+                f"Association Question: Are {factor_a} and {factor_b} associated?"
+            )
+
+        response_format_parts: List[str] = []
+        for idx in range(1, len(edge_pairs) + 1):
+            response_format_parts.append(
+                f"--- Edge {idx} ---\n"
+                f"Thoughts: [Write your thoughts on the question]\n"
+                f"Answer: (A) Associated (B) Independent (C) Unknown"
+            )
+
+        header = (
+            "Consider each edge independently according to the Association Context above. "
+            "For each edge, evaluate the association relationship on its own merits.\n\n"
+        )
+
+        footer = (
+            "\n\nExpected Response Format (respond with the same --- Edge N --- delimiters):\n"
+            + "\n".join(response_format_parts)
+        )
+
+        return header + "\n".join(edge_sections) + footer
+
+    @staticmethod
+    def bg_association_type_system_context(
+        factors: List[str],
+        domains: List[str],
+    ) -> str:
+        """Return the system message for BG association TYPE verification.
+
+        Based on paper A.3.7: LLM Association Type Query (with background knowledge).
+        """
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        context = CausalIFPrompts.association_type_context()
+
+        return f"""{background}
+
+Read and understand the 'Association Type Context'. Consider carefully the role of any of the third factors appearing according to the Association Type Context. Then, based on your thoughts so far, answer the 'Association Type Question' with the 'Given Third Factors', and write your thoughts. Respond according to the expected format.
+
+Association Type Context:
+$$$
+{context}
+$$$
+
+You will receive batches of edge pairs. For each edge, answer the association type question using the exact --- Edge N --- delimiters shown."""
+
+    @staticmethod
+    def bg_association_type_edge_batch(
+        edge_pairs: List[Tuple[str, str]],
+        factors: List[str],
+    ) -> str:
+        """Return a human message containing only the BG edge type questions.
+
+        Based on paper A.3.7: uses 'Given Third Factors' terminology.
+        """
+        edge_sections: List[str] = []
+        for idx, (factor_a, factor_b) in enumerate(edge_pairs, 1):
+            available_factors = [f for f in factors if f not in [factor_a, factor_b]]
+            available_factors_str = ', '.join(available_factors) if available_factors else "None"
+            edge_sections.append(
+                f"--- Edge {idx} ---\n"
+                f"Main factors: {factor_a} and {factor_b}\n"
+                f"Given Third Factors: {available_factors_str}\n"
+                f"Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?"
+            )
+
+        response_format_parts: List[str] = []
+        for idx in range(1, len(edge_pairs) + 1):
+            response_format_parts.append(
+                f"--- Edge {idx} ---\n"
+                f"Thoughts: [Write your thoughts on the question]\n"
+                f"Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown\n"
+                f"Intermediary Factors: [Skip this if you did not choose D or C above. Otherwise list all factors involved in this indirect association relationship, each separated by a comma]"
+            )
+
+        header = (
+            "Consider each edge independently according to the Association Type Context above. "
+            "For each edge, evaluate the association type on its own merits with its own Given Third Factors.\n\n"
+        )
+
+        footer = (
+            "\n\nExpected Response Format (respond with the same --- Edge N --- delimiters):\n"
+            + "\n".join(response_format_parts)
+        )
+
+        return header + "\n".join(edge_sections) + footer
+
+    @staticmethod
+    def doc_association_system_context(
+        factors: List[str],
+        domains: List[str],
+        document_content: str
+    ) -> str:
+        """Return the system message containing the document and association instructions.
+
+        Based on paper A.3.4: LLM Association Query (with documents).
+        This is sent once per source document; edge batches reference it via
+        follow-up human messages built by :meth:`doc_association_edge_batch`.
+        """
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        context = CausalIFPrompts.association_context()
+
+        return f"""{background}
+
+Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', try to find statistical evidence to clarify the association relationship between each pair of 'Main factors' that will be provided in follow-up messages according to the 'Association Context' (delimited by double dollar signs).
+
+Consider the given document and the association context. Answer the 'Association Question', write your thoughts, and give the reference in the given document. Respond according to the expected format.
+
+Document:
+{document_content}
+
+Association Context:
+$$
+{context}
+$$
+
+You will receive batches of edge pairs. For each edge, answer the association question using the exact --- Edge N --- delimiters shown."""
+
+    @staticmethod
+    def doc_association_edge_batch(
+        edge_pairs: List[Tuple[str, str]],
+    ) -> str:
+        """Return a human message containing only the edge questions (no document)."""
+        edge_sections: List[str] = []
+        for idx, (factor_a, factor_b) in enumerate(edge_pairs, 1):
+            edge_sections.append(
+                f"--- Edge {idx} ---\n"
+                f"Main factors: {factor_a} and {factor_b}\n"
+                f"Association Question: Are {factor_a} and {factor_b} associated?"
+            )
+
+        response_format_parts: List[str] = []
+        for idx in range(1, len(edge_pairs) + 1):
+            response_format_parts.append(
+                f"--- Edge {idx} ---\n"
+                f"Thoughts: [Write your thoughts on the question]\n"
+                f"Answer: (A) Associated (B) Independent (C) Unknown\n"
+                f"Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]"
+            )
+
+        header = (
+            "Consider each edge independently according to the Association Context and the given Document above. "
+            "For each edge, evaluate the association relationship on its own merits.\n\n"
+        )
+
+        footer = (
+            "\n\nExpected Response Format (respond with the same --- Edge N --- delimiters):\n"
+            + "\n".join(response_format_parts)
+        )
+
+        return header + "\n".join(edge_sections) + footer
+
+    @staticmethod
+    def doc_association_type_system_context(
+        factors: List[str],
+        domains: List[str],
+        document_content: str
+    ) -> str:
+        """Return the system message for association TYPE queries with document context.
+
+        Based on paper A.3.5: LLM Association Type Query (with documents).
+        """
+        background = CausalIFPrompts.background_reminder(factors, domains)
+        context = CausalIFPrompts.association_type_context()
+
+        return f"""{background}
+
+Read and understand the Association Type Context. Consider carefully the role of any of the third factors appearing according to the Association Type Context. Then, based on your thoughts so far, answer the 'Association Type Question' with the 'Given Third Factors', write your thoughts, and give your reference in the given document. Respond according to the expected format.
+
+Document:
+{document_content}
+
+Association Type Context:
+$$$
+{context}
+$$$
+
+You will receive batches of edge pairs. For each edge, answer the association type question using the exact --- Edge N --- delimiters shown."""
+
+    @staticmethod
+    def doc_association_type_edge_batch(
+        edge_pairs: List[Tuple[str, str]],
+        factors: List[str],
+    ) -> str:
+        """Return a human message containing only the edge type questions (no document).
+
+        Based on paper A.3.5: uses 'Given Third Factors' terminology.
+        """
+        edge_sections: List[str] = []
+        for idx, (factor_a, factor_b) in enumerate(edge_pairs, 1):
+            available_factors = [f for f in factors if f not in [factor_a, factor_b]]
+            available_factors_str = ', '.join(available_factors) if available_factors else "None"
+            edge_sections.append(
+                f"--- Edge {idx} ---\n"
+                f"Main factors: {factor_a} and {factor_b}\n"
+                f"Given Third Factors: {available_factors_str}\n"
+                f"Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?"
+            )
+
+        response_format_parts: List[str] = []
+        for idx in range(1, len(edge_pairs) + 1):
+            response_format_parts.append(
+                f"--- Edge {idx} ---\n"
+                f"Thoughts: [Write your thoughts on the question]\n"
+                f"Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown\n"
+                f"Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]\n"
+                f"Intermediary Factors: [Skip this if you did not choose D or C above. Otherwise list all factors involved in this indirect association relationship, each separated by a comma]"
+            )
+
+        header = (
+            "Consider each edge independently according to the Association Type Context and the given Document above. "
+            "For each edge, evaluate the association type on its own merits with its own Given Third Factors.\n\n"
+        )
+
+        footer = (
+            "\n\nExpected Response Format (respond with the same --- Edge N --- delimiters):\n"
+            + "\n".join(response_format_parts)
+        )
+
+        return header + "\n".join(edge_sections) + footer
+
     @staticmethod
     def association_type_context() -> str:
         """
         Return context explaining direct vs indirect association for LACR 1 algorithm.
         
-        This context is used in Step 3 (Association Type Verifier) of the 4-step
-        constraint-based causal (CC) prompt strategy from the paper.
+        Based on paper A.3.2: Association Type Context (exact phrasing).
         
         Reference: Section 3.2.1 of "Causal Graph Discovery with Retrieval-Augmented 
         Generation based Large Language Models" (https://arxiv.org/html/2402.15301v2)
@@ -39,145 +307,19 @@ class CausalIFPrompts:
         Returns:
             str: Context text explaining direct association, indirect association, and unknown
         """
-        return """The association relationship between two factors A and B can be direct or indirect:
+        return """If two factors A and B are associated, they may be directly associated or indirectly associated with respect to a set of Given Third Factors, and it can be clarified by the following principle:
 
-1. Direct Association: A and B are associated, and this association cannot be eliminated by controlling for (conditioning on) any other variables in the given factor set. In causal terms, A and B cannot be d-separated by any subset of the other variables.
+1. The first principle is to try to find statistical evidence from the given knowledge to clarify the following association types. If you cannot find statistical evidence, at lease find evidence that is likely to be able to statistically clarify the association type between A and B. If no obvious evidence can be found, the association type is unknown.
 
-2. Indirect Association: A and B are associated, but this association can be eliminated by controlling for (conditioning on) some intermediary variables. These intermediary variables mediate the relationship between A and B.
+2. If the evidence shows that any factors from the Given Third Factors mediate the association between A and B, then A and B are indirectly associated via these factors.
 
-3. If you cannot determine whether the association is direct or indirect based on available evidence, it is unknown."""
+3. If the evidence shows that by controlling any factors from the Given Third Factors, A and B are not associated any more, then A and B are associated indirectly.
+
+4. If the evidence shows that A and B are still associated even if we control any of the given third factors, then A and B are directly associated.
+
+5. If you think A and B are indirectly associated via any of the given third factors, it must be true that: (1) A and the third factors are directly associated; (2) B and the third factors are directly associated."""
     
-    @staticmethod
-    def association_type_verifier(
-        factor_a: str,
-        factor_b: str,
-        factors: List[str],
-        domains: List[str],
-        document_content: str
-    ) -> str:
-        """
-        Generate prompt for Step 3 (Association Type Verifier) with document.
-        
-        This method implements Step 3 of the 4-step constraint-based causal (CC) prompt
-        strategy from the paper. It determines whether the association between two factors
-        is direct or indirect based on document evidence.
-        
-        Reference: Section 3.2.1, Algorithm 1 (LACR 1) of "Causal Graph Discovery with 
-        Retrieval-Augmented Generation based Large Language Models" 
-        (https://arxiv.org/html/2402.15301v2)
-        
-        Args:
-            factor_a: First factor in the pair being analyzed
-            factor_b: Second factor in the pair being analyzed
-            factors: Complete list of all factors in the variable set V
-            domains: List of domain names for context
-            document_content: Retrieved document content for evidence
-            
-        Returns:
-            str: Formatted prompt for association type verification with document
-            
-        Expected Response Format:
-            Thoughts: [Analysis of the question]
-            Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
-            Intermediary Factors: [List if (E), otherwise "None"]
-            Reference: [Supporting sentence from document, skip if (C)]
-        """
-        # Get background reminder
-        background = CausalIFPrompts.background_reminder(factors, domains)
-        
-        # Get association type context
-        context = CausalIFPrompts.association_type_context()
-        
-        # Build list of available factors for mediation (exclude factor_a and factor_b)
-        available_factors = [f for f in factors if f not in [factor_a, factor_b]]
-        available_factors_str = ', '.join(available_factors) if available_factors else "None"
-        
-        # Build the prompt
-        prompt = f"""{background}
-
-Your task is to thoroughly read the given 'Document'. Then, based on the knowledge from the given 'Document', determine whether the association between the pair of 'Main factors' is direct or indirect according to the 'Association Type Context'.
-
-Document: {document_content}
-
-Main factors: {factor_a} and {factor_b}
-
-Available factors for mediation: {available_factors_str}
-
-Association Type Context:
-{context}
-
-Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?
-
-Expected Response Format:
-Thoughts: [Write your thoughts on the question]
-Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
-Intermediary Factors: [If you chose (E), list the intermediary factors that mediate the relationship. Otherwise, write "None"]
-Reference: [Skip this if you chose option C above. Otherwise, provide a supporting sentence from the document for your choice]"""
-        
-        return prompt
     
-    @staticmethod
-    def association_type_verifier_bg(
-        factor_a: str,
-        factor_b: str,
-        factors: List[str],
-        domains: List[str]
-    ) -> str:
-        """
-        Generate prompt for Step 3 (Association Type Verifier) with background knowledge.
-        
-        This method implements Step 3 of the 4-step constraint-based causal (CC) prompt
-        strategy from the paper. It determines whether the association between two factors
-        is direct or indirect based on the LLM's background knowledge (training data).
-        
-        Reference: Section 3.2.1, Algorithm 1 (LACR 1) of "Causal Graph Discovery with 
-        Retrieval-Augmented Generation based Large Language Models" 
-        (https://arxiv.org/html/2402.15301v2)
-        
-        Args:
-            factor_a: First factor in the pair being analyzed
-            factor_b: Second factor in the pair being analyzed
-            factors: Complete list of all factors in the variable set V
-            domains: List of domain names for context
-            
-        Returns:
-            str: Formatted prompt for association type verification with background knowledge
-            
-        Expected Response Format:
-            Thoughts: [Analysis of the question]
-            Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
-            Intermediary Factors: [List if (E), otherwise "None"]
-        """
-        # Get background reminder
-        background = CausalIFPrompts.background_reminder(factors, domains)
-        
-        # Get association type context
-        context = CausalIFPrompts.association_type_context()
-        
-        # Build list of available factors for mediation (exclude factor_a and factor_b)
-        available_factors = [f for f in factors if f not in [factor_a, factor_b]]
-        available_factors_str = ', '.join(available_factors) if available_factors else "None"
-        
-        # Build the prompt
-        prompt = f"""{background}
-
-Your task is to thoroughly use the knowledge in your training data to solve a task. Your task is: based on your background knowledge, determine whether the association between the pair of 'Main factors' is direct or indirect according to the 'Association Type Context'.
-
-Main factors: {factor_a} and {factor_b}
-
-Available factors for mediation: {available_factors_str}
-
-Association Type Context:
-{context}
-
-Association Type Question: Are {factor_a} and {factor_b} directly associated or indirectly associated?
-
-Expected Response Format:
-Thoughts: [Write your thoughts on the question]
-Answer: (D) Directly Associated (E) Indirectly Associated (C) Unknown
-Intermediary Factors: [If you chose (E), list the intermediary factors that mediate the relationship. Otherwise, write "None"]"""
-        
-        return prompt
 
     
     @staticmethod
@@ -320,12 +462,12 @@ def format_causal_graph_for_llm(causal_relationships: List[Dict], target_factor:
         output.append("=" * 80)
         output.append("DIRECT CAUSES OF " + target_factor.upper() + " (Degree 1)")
         output.append("=" * 80)
-        for i, rel in enumerate(sorted(direct_causes, key=lambda x: x.get('causal_strength', 0) or 0, reverse=True), 1):
-            strength = rel.get('causal_strength', 0) or 0
-            strength_label = "very strong" if strength > 0.7 else "strong" if strength > 0.5 else "moderate" if strength > 0.3 else "weak"
+        for i, rel in enumerate(sorted(direct_causes, key=lambda x: x.get('llm_confidence', 0) or 0, reverse=True), 1):
+            confidence = rel.get('llm_confidence', 0) or 0
+            confidence_label = "high" if confidence >= 3 else "moderate" if confidence >= 2 else "low"
             
             output.append(f"\n{i}. {rel['cause']} → {rel['effect']}")
-            output.append(f"   • Causal strength: {strength:.2f} ({strength_label})")
+            output.append(f"   • LLM confidence: {confidence:.1f} ({confidence_label})")
             if 'evidence' in rel and rel['evidence']:
                 output.append(f"   • Evidence: {rel['evidence']}")
     
@@ -360,11 +502,11 @@ def format_causal_graph_for_llm(causal_relationships: List[Dict], target_factor:
             
             # Show key relationships at this degree
             output.append(f"\nKey causal relationships at degree {degree}:")
-            sorted_rels = sorted(rels_at_degree, key=lambda x: x.get('causal_strength', 0) or 0, reverse=True)
+            sorted_rels = sorted(rels_at_degree, key=lambda x: x.get('llm_confidence', 0) or 0, reverse=True)
             for i, rel in enumerate(sorted_rels[:10], 1):  # Top 10 per degree
-                strength = rel.get('causal_strength', 0) or 0
+                confidence = rel.get('llm_confidence', 0) or 0
                 output.append(f"\n  {i}. {rel['cause']} → {rel['effect']}")
-                output.append(f"     - Strength: {strength:.2f}")
+                output.append(f"     - LLM confidence: {confidence:.1f}")
                 
                 if 'path_to_target' in rel and rel['path_to_target']:
                     path_str = " → ".join(rel['path_to_target'])
@@ -375,11 +517,11 @@ def format_causal_graph_for_llm(causal_relationships: List[Dict], target_factor:
         output.append("\n\n" + "=" * 80)
         output.append(f"EFFECTS OF {target_factor.upper()} (What it influences)")
         output.append("=" * 80)
-        sorted_effects = sorted(other_relationships, key=lambda x: x.get('causal_strength', 0) or 0, reverse=True)
+        sorted_effects = sorted(other_relationships, key=lambda x: x.get('llm_confidence', 0) or 0, reverse=True)
         for i, rel in enumerate(sorted_effects[:10], 1):  # Top 10 effects
-            strength = rel.get('causal_strength', 0) or 0
+            confidence = rel.get('llm_confidence', 0) or 0
             output.append(f"\n{i}. {rel['cause']} → {rel['effect']}")
-            output.append(f"   • Strength: {strength:.2f}")
+            output.append(f"   • LLM confidence: {confidence:.1f}")
     
     return "\n".join(output)
 
@@ -418,11 +560,12 @@ def generate_llm_interpretation(causalif_result: Dict, original_query: str, mode
         influences_text = "\n\nSTRONGEST CAUSAL INFLUENCES ON " + target_factor.upper() + ":\n"
         for i, inf in enumerate(strongest_influences[:5], 1):
             factor_name = inf.get('influencing_factor', 'unknown')
-            strength = inf.get('causal_strength', 0) or 0
+            confidence = inf.get('llm_confidence', 0) or 0
             degree = inf.get('degree', 'N/A')
-            influences_text += f"{i}. {factor_name}: strength {strength:.2f}, degree {degree}\n"
+            influences_text += f"{i}. {factor_name}: LLM confidence {confidence:.1f}, degree {degree}\n"
     
     # NEW: Build causal inference context (adjustment sets, confounders)
+    all_confounders = set()
     causal_inference_text = ""
     if causal_inference_summary:
         causal_inference_text = "\n\n" + "=" * 80 + "\n"
@@ -451,7 +594,6 @@ def generate_llm_interpretation(causalif_result: Dict, original_query: str, mode
                 causal_inference_text += f"  • {target_factor} → {effect}\n"
         
         # Collect all unique confounders
-        all_confounders = set()
         for adj_set in adjustment_sets.values():
             if adj_set:
                 all_confounders.update(adj_set)
@@ -473,7 +615,7 @@ def generate_llm_interpretation(causalif_result: Dict, original_query: str, mode
         stats_text += f"- Factors analyzed: {network_summary.get('total_factors', 0)}\n"
         if causal_inference_summary:
             stats_text += f"- Causal inference enabled: Yes\n"
-            stats_text += f"- Confounders identified: {len(all_confounders) if 'all_confounders' in locals() else 0}\n"
+            stats_text += f"- Confounders identified: {len(all_confounders)}\n"
     
     # Get prompt from CausalIFPrompts - now includes causal inference text
     prompt = CausalIFPrompts.interpretation_prompt(
@@ -493,19 +635,17 @@ def generate_llm_interpretation(causalif_result: Dict, original_query: str, mode
         prompt += "3. How to design experiments or interventions that account for confounding\n"
     
     try:
-        print("\n" + "="*80)
-        print("Generating LLM interpretation of causal graph...")
+        logger.info("Generating LLM interpretation of causal graph...")
         if causal_inference_summary:
-            print("  ✓ Including causal inference analysis (adjustment sets & confounders)")
-        print("="*80)
+            logger.info("  ✓ Including causal inference analysis (adjustment sets & confounders)")
         
         response = model.invoke(prompt)
         interpretation = response.content if hasattr(response, 'content') else str(response)
         
-        print("✓ LLM interpretation generated successfully\n")
+        logger.info("✓ LLM interpretation generated successfully")
         
         return interpretation
         
     except Exception as e:
-        print(f"Error generating LLM interpretation: {e}")
+        logger.error(f"Error generating LLM interpretation: {e}")
         return f"Error generating interpretation: {str(e)}"

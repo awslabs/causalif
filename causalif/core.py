@@ -1,16 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Core data structures and enums for CausalIF"""
-
-from enum import Enum
-
-
-# Keep all your existing enums and classes unchanged
-class AssociationResponse(str, Enum):
-    ASSOCIATED = "ASSOCIATED"
-    INDEPENDENT = "INDEPENDENT"
-    UNKNOWN = "UNKNOWN"
+"""Core data structures for CausalIF"""
 
 
 class KnowledgeBase:
