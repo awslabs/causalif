@@ -3,35 +3,46 @@
 
 """LangChain tool wrappers and helper functions for CausalIF"""
 
-from typing import List, Tuple, Dict
+import logging
 import re
-import pandas as pd
-import networkx as nx
-import plotly.graph_objects as go
+import threading
+from typing import List, Dict, Optional
 from langchain_core.tools import tool
 
 from .engine import CausalIFEngine
-from .visualization import visualize_causalif_results
-from .prompts import format_causal_graph_for_llm, generate_llm_interpretation
+from .prompts import generate_llm_interpretation
 
-# Global CausalIF engine instance
-_global_causalif_engine = None
+logger = logging.getLogger(__name__)
+
+# Thread-safe global CausalIF engine instance
+_engine_lock = threading.Lock()
+_global_causalif_engine: Optional[CausalIFEngine] = None
 
 
-def set_causalif_engine(model, retriever_tool=None, dataframe=None, k_documents: int = None, max_doc_chars: int = None, 
+def _get_engine() -> Optional[CausalIFEngine]:
+    """Thread-safe accessor for the global CausalIF engine."""
+    with _engine_lock:
+        return _global_causalif_engine
+
+
+def set_causalif_engine(model, retriever_tool=None, retriever=None, dataframe=None, max_token_limit: int = None,
                     max_degrees: int = None, max_parallel_queries: int = None,
                     excluded_target_columns: List[str] = None, excluded_related_columns: List[str] = None,
                     related_factors: List[str] = None, selected_dataframe_columns: List[str] = None,
-                    enable_causal_estimate: bool = None, domains: List[str] = None):
+                    enable_causal_estimate: bool = None, domains: List[str] = None,
+                    bootstrap_iterations: int = None, bootstrap_threshold: float = None):
     """
     Set the global CausalIF engine instance with Bayesian causal inference.
     
     Args:
         model: LLM model for CausalIF queries
-        retriever_tool: RAG retriever for document knowledge
+        retriever_tool: RAG retriever tool (LangChain tool wrapper) for document knowledge
+        retriever: Raw retriever instance (e.g. AmazonKnowledgeBasesRetriever) for metadata access.
+                   When provided, enables tracking of unique source document counts per edge.
+                   If only retriever_tool is provided, document counts will be unavailable.
         dataframe: Observational data for Bayesian inference
-        k_documents: Number of documents to use per variable pair (default: 10, as per LACR paper)
-        max_doc_chars: Maximum characters to use from each document (default: 2000, ~400-500 tokens)
+        max_token_limit: Maximum token count per document before summarization (default: 150000).
+                         Documents exceeding this limit are summarized via LLM instead of truncated.
         max_degrees: Maximum degrees of separation (None = no filtering, shows entire graph)
         max_parallel_queries: Maximum parallel LLM queries
         excluded_target_columns: List of column names to exclude from target factor selection
@@ -50,25 +61,21 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, k_documents:
     
     if dataframe is not None and hasattr(dataframe, 'columns'):
         if selected_dataframe_columns is not None:
-            # Filter to only the specified columns that exist in the dataframe
             valid_columns = [col for col in selected_dataframe_columns if col in dataframe.columns]
             
             if valid_columns:
-                # Create filtered dataframe with only selected columns
                 filtered_dataframe = dataframe[valid_columns].copy()
                 dataframe_columns_to_use = valid_columns
-                print(f"✓ Filtered dataframe to {len(valid_columns)} selected columns")
+                logger.info(f"✓ Filtered dataframe to {len(valid_columns)} selected columns")
             else:
-                print(f"⚠️  Warning: None of the selected columns exist in the dataframe")
+                logger.warning("None of the selected columns exist in the dataframe")
                 filtered_dataframe = dataframe
                 dataframe_columns_to_use = list(dataframe.columns)
             
-            # Warn about columns that don't exist
             missing_cols = [col for col in selected_dataframe_columns if col not in dataframe.columns]
             if missing_cols:
-                print(f"⚠️  Warning: The following selected columns are not in the dataframe: {missing_cols}")
+                logger.warning(f"The following selected columns are not in the dataframe: {missing_cols}")
         else:
-            # Use all dataframe columns
             dataframe_columns_to_use = list(dataframe.columns)
     
     # Start with provided related_factors (can include factors not in dataframe)
@@ -82,66 +89,75 @@ def set_causalif_engine(model, retriever_tool=None, dataframe=None, k_documents:
     # Remove duplicates while preserving order
     combined_related_factors = list(dict.fromkeys(combined_related_factors))
     
-    # Set default domains if not provided
-    #if domains is None:
-    #    domains = ['supply_chain', 'logistics', 'operations', 'performance_metrics']
-    
-    _global_causalif_engine = CausalIFEngine(
+    # Build kwargs, only passing non-None values so CausalIFEngine defaults are preserved
+    engine_kwargs = dict(
         model=model,
         retriever_tool=retriever_tool,
-        dataframe=filtered_dataframe,  # Use filtered dataframe
-        k_documents=k_documents,
-        max_doc_chars=max_doc_chars,
-        max_degrees=max_degrees,
-        max_parallel_queries=max_parallel_queries,
+        retriever=retriever,
+        dataframe=filtered_dataframe,
         excluded_target_columns=excluded_target_columns,
         excluded_related_columns=excluded_related_columns,
         related_factors=combined_related_factors,
         selected_dataframe_columns=selected_dataframe_columns,
-        enable_causal_estimate=enable_causal_estimate,
-        domains=domains
     )
-    print(f"CausalIF engine configured with Bayesian causal inference")
-    print(f"k_documents={k_documents}, max_doc_chars={max_doc_chars}, max_degrees={max_degrees if max_degrees is not None else 'None (no filtering)'}, max_parallel_queries={max_parallel_queries}")
-    print(f"Causal inference: {'ENABLED ✓' if enable_causal_estimate else 'DISABLED (use enable_causal_estimate=True to enable)'}")
-    print(f"RAG retriever available: {retriever_tool is not None}")
-    print(f"Dataframe available: {filtered_dataframe is not None}")
+    if max_token_limit is not None:
+        engine_kwargs['max_token_limit'] = max_token_limit
+    if max_degrees is not None:
+        engine_kwargs['max_degrees'] = max_degrees
+    if max_parallel_queries is not None:
+        engine_kwargs['max_parallel_queries'] = max_parallel_queries
+    if enable_causal_estimate is not None:
+        engine_kwargs['enable_causal_estimate'] = enable_causal_estimate
+    if domains is not None:
+        engine_kwargs['domains'] = domains
+    if bootstrap_iterations is not None:
+        engine_kwargs['bootstrap_iterations'] = bootstrap_iterations
+    if bootstrap_threshold is not None:
+        engine_kwargs['bootstrap_threshold'] = bootstrap_threshold
+    
+    with _engine_lock:
+        _global_causalif_engine = CausalIFEngine(**engine_kwargs)
+
+    logger.info("CausalIF engine configured with Bayesian causal inference")
+    logger.info(f"max_token_limit={max_token_limit if max_token_limit is not None else '150000 (default)'}, "
+                f"max_degrees={max_degrees if max_degrees is not None else 'None (no filtering)'}, "
+                f"max_parallel_queries={max_parallel_queries}")
+    logger.info(f"Causal inference: {'ENABLED ✓' if enable_causal_estimate else 'DISABLED (use enable_causal_estimate=True to enable)'}")
+    logger.info(f"RAG retriever available: {retriever_tool is not None or retriever is not None}")
+    logger.info(f"RAG raw retriever (metadata access): {retriever is not None}")
+    logger.info(f"Dataframe available: {filtered_dataframe is not None}")
     if filtered_dataframe is not None:
-        print(f"Dataframe shape: {filtered_dataframe.shape} ({len(filtered_dataframe)} rows, {len(filtered_dataframe.columns)} columns)")
+        logger.info(f"Dataframe shape: {filtered_dataframe.shape} ({len(filtered_dataframe)} rows, {len(filtered_dataframe.columns)} columns)")
     if excluded_target_columns:
-        print(f"Excluded target columns: {excluded_target_columns}")
+        logger.info(f"Excluded target columns: {excluded_target_columns}")
     if excluded_related_columns:
-        print(f"Excluded related columns: {excluded_related_columns}")
+        logger.info(f"Excluded related columns: {excluded_related_columns}")
     if selected_dataframe_columns:
-        print(f"Selected dataframe columns: {len(dataframe_columns_to_use)} of {len(selected_dataframe_columns)} requested")
-        print(f"  Columns: {dataframe_columns_to_use}")
+        logger.info(f"Selected dataframe columns: {len(dataframe_columns_to_use)} of {len(selected_dataframe_columns)} requested")
+        logger.info(f"  Columns: {dataframe_columns_to_use}")
     if combined_related_factors:
-        print(f"Related factors for CausalIF 1 analysis: {len(combined_related_factors)} factors")
-        print(f"  (includes {len(related_factors) if related_factors else 0} provided + {len(dataframe_columns_to_use)} from dataframe)")
+        logger.info(f"Related factors for CausalIF 1 analysis: {len(combined_related_factors)} factors")
+        logger.info(f"  (includes {len(related_factors) if related_factors else 0} provided + {len(dataframe_columns_to_use)} from dataframe)")
     if domains:
-        print(f"Domains: {domains}")
+        logger.info(f"Domains: {domains}")
 
 
 
 def extract_factors_from_query(query: str, available_columns: List[str], 
-                              excluded_target_columns: List[str] = None,
-                              excluded_related_columns: List[str] = None) -> str:
+                              excluded_target_columns: List[str] = None) -> str:
     """
-    Extract target factor and related factors from query.
+    Extract target factor from query by matching against available columns.
     
     Args:
         query: User query string
         available_columns: List of available column names from dataframe
         excluded_target_columns: Columns to exclude from target factor selection
-        excluded_related_columns: Columns to exclude from related factors
         
     Returns:
-        Tuple of (target_factor, related_factors)
+        str: The extracted target factor
     """
     
-    # Default exclusions if not provided
     EXCLUDED_COLUMNS = set(col.lower() for col in excluded_target_columns) if excluded_target_columns else set()
-    EXCLUDED_RELATED_FACTORS = set(col.lower() for col in excluded_related_columns) if excluded_related_columns else set()
     
     # Patterns with optional context support (e.g., "revenue in pva")
     patterns = [
@@ -156,94 +172,600 @@ def extract_factors_from_query(query: str, available_columns: List[str],
     query_lower = query.lower()
     target_factor = None
     context = None
+    # Track the raw extracted token for logging in the fallback column-matching block
+    extracted_token = None
     
     # STEP 1: Try exact word-by-word matching first (highest priority)
-    # Look for exact column names in the query
     for col in available_columns:
         if col.lower() not in EXCLUDED_COLUMNS:
-            # Check if the exact column name appears as a word in the query
-            # Use word boundaries to avoid partial matches
-            import re as re_module
-            pattern = r'\b' + re_module.escape(col.lower()) + r'\b'
-            if re_module.search(pattern, query_lower):
+            pattern = r'\b' + re.escape(col.lower()) + r'\b'
+            if re.search(pattern, query_lower):
                 target_factor = col
-                print(f"Exact match found: '{col}' in query")
+                logger.info(f"Exact match found: '{col}' in query")
                 break
     
-    # If exact match found, skip pattern matching
     if target_factor:
         return target_factor
 
     # STEP 2: Pattern matching (if no exact match)
-    if target_factor is None:
-        import re
-        for pattern in patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                # Extract metric and context from capture groups
-                groups = match.groups()
-                # Filter out None values from groups
-                non_none_groups = [g for g in groups if g is not None]
-                
-                if len(non_none_groups) >= 2:
-                    # Pattern with context (e.g., "intake in pva")
-                    target_factor = non_none_groups[0]
-                    context = non_none_groups[1]
-                elif len(non_none_groups) == 1:
-                    # Pattern without context (e.g., "ftg")
-                    target_factor = non_none_groups[0]
-                    context = None
-                break
+    for pattern in patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            groups = match.groups()
+            non_none_groups = [g for g in groups if g is not None]
+            
+            if len(non_none_groups) >= 2:
+                target_factor = non_none_groups[0]
+                context = non_none_groups[1]
+            elif len(non_none_groups) == 1:
+                target_factor = non_none_groups[0]
+                context = None
+            # Save the raw extracted token for logging
+            extracted_token = non_none_groups[0] if non_none_groups else None
+            break
     
     # If target_factor was extracted but doesn't exist in available_columns,
     # try to find a matching column based on metric and context
     if target_factor and target_factor not in available_columns:
-        # Try to find columns containing the target_factor and context
-        # Exclude dimensional/grouping columns
         matching_cols = [col for col in available_columns 
                         if target_factor in col.lower() and col.lower() not in EXCLUDED_COLUMNS]
         
         if context:
-            # Filter by context (pva or uvp)
             context_cols = [col for col in matching_cols if context in col.lower()]
             if context_cols:
                 matching_cols = context_cols
-                print(f"Filtered columns by context '{context}': {context_cols}")
+                logger.info(f"Filtered columns by context '{context}': {context_cols}")
         
+        context_str = f" in {context}" if context else ""
         if matching_cols:
-            # Prefer columns with "baseline" or "actuals" for metrics
             baseline_cols = [col for col in matching_cols if 'baseline' in col.lower()]
             actual_cols = [col for col in matching_cols if 'actual' in col.lower()]
             
             if baseline_cols:
                 target_factor = baseline_cols[0]
-                context_str = f" in {context}" if context else ""
-                print(f"Mapped '{non_none_groups[0]}{context_str}' → '{target_factor}' (baseline metric)")
+                logger.info(f"Mapped '{extracted_token}{context_str}' → '{target_factor}' (baseline metric)")
             elif actual_cols:
                 target_factor = actual_cols[0]
-                context_str = f" in {context}" if context else ""
-                print(f"Mapped '{non_none_groups[0]}{context_str}' → '{target_factor}' (actuals metric)")
+                logger.info(f"Mapped '{extracted_token}{context_str}' → '{target_factor}' (actuals metric)")
             else:
                 target_factor = matching_cols[0]
-                context_str = f" in {context}" if context else ""
-                print(f"Mapped '{non_none_groups[0]}{context_str}' → '{target_factor}'")
+                logger.info(f"Mapped '{extracted_token}{context_str}' → '{target_factor}'")
         else:
-            # No matching column found, reset target_factor
-            context_str = f" in {context}" if context else ""
-            print(f"Warning: Extracted '{target_factor}{context_str}' not found in dataframe columns")
+            logger.warning(f"Extracted '{target_factor}{context_str}' not found in dataframe columns")
             target_factor = None
         
-    # If no target_factor found after all attempts, fail the analysis
     if not target_factor:
         raise ValueError(
             f"Could not identify target factor from query: '{query}'. "
-            f"Please specify a valid column name from the backgroud data or supplied dataframe. "
+            f"Please specify a valid column name from the background data or supplied dataframe. "
             f"Available columns: {', '.join(available_columns[:10])}{'...' if len(available_columns) > 10 else ''}"
         )
 
     return target_factor
 
 
+def parse_intervention_query(query: str, available_columns: List[str]) -> Optional[Dict]:
+    """
+    Detect if a query is an interventional (do-operator) question and extract
+    the target variable and intervention variables.
+
+    Supports multi-word column names (e.g. "shipping cost") via regex alternation
+    built from the available columns list.
+
+    Supported natural language patterns:
+      - "what happens to Y if X is high"
+      - "what happens to Y if we set X to high"
+      - "what is the effect on Y if X is low"
+      - "what would Y be if X is high and Z is low"
+      - "if X is high, what happens to Y"
+      - "how does Y change if X is high"
+      - "what if X is high, what happens to Y"
+      - "effect of setting X to high on Y"
+
+    Args:
+        query: Natural language query string.
+        available_columns: List of known variable/column names.
+
+    Returns:
+        Dict with 'target' and 'do_vars' if interventional, None otherwise.
+    """
+    q_lower = query.strip().lower()
+
+    intervention_keywords = [
+        'what happens', 'what would', 'what if', 'how does', 'how would',
+        'effect of setting', 'effect on', 'if we set', 'if we change',
+        'impact on', 'impact of setting',
+    ]
+    if not any(kw in q_lower for kw in intervention_keywords):
+        return None
+
+    # Build a regex alternation of column names (longest first to avoid partial matches).
+    # re.escape handles spaces and special characters in column names.
+    sorted_cols = sorted(available_columns, key=len, reverse=True)
+    col_pattern = '|'.join(re.escape(c) for c in sorted_cols)
+    col_re = re.compile(col_pattern, re.IGNORECASE)
+
+    value_words = r'(?:high|low|medium|very\s+high|very\s+low|\d+)'
+
+    # --- Pattern group 1: "what happens to Y if X is V [and Z is W]" ---
+    m = re.search(
+        r'(?:what\s+happens\s+to|what\s+would|how\s+does|how\s+would)\s+'
+        r'(.+?)\s+'
+        r'(?:be\s+)?(?:if|when)\s+(.+)',
+        q_lower
+    )
+    if m:
+        target_raw = m.group(1).strip().rstrip('?')
+        conditions_raw = m.group(2).strip().rstrip('?')
+        return _build_intervention(target_raw, conditions_raw, col_re, value_words, available_columns)
+
+    # --- Pattern group 2: "if X is V, what happens to Y" ---
+    m = re.search(
+        r'(?:what\s+if|if)\s+(.+?),?\s*'
+        r'(?:what\s+happens\s+to|what\s+(?:is|would\s+be)\s+(?:the\s+)?(?:effect\s+on)?)\s*'
+        r'(.+)',
+        q_lower
+    )
+    if m:
+        conditions_raw = m.group(1).strip().rstrip('?')
+        target_raw = m.group(2).strip().rstrip('?')
+        return _build_intervention(target_raw, conditions_raw, col_re, value_words, available_columns)
+
+    # --- Pattern group 3: "effect of setting X to V on Y" ---
+    m = re.search(
+        r'(?:effect|impact)\s+of\s+setting\s+(.+?)\s+on\s+(.+)',
+        q_lower
+    )
+    if m:
+        conditions_raw = m.group(1).strip().rstrip('?')
+        target_raw = m.group(2).strip().rstrip('?')
+        return _build_intervention(target_raw, conditions_raw, col_re, value_words, available_columns)
+
+    return None
+
+
+def _build_intervention(
+    target_raw: str,
+    conditions_raw: str,
+    col_re: re.Pattern,
+    value_words: str,
+    available_columns: List[str],
+) -> Optional[Dict]:
+    """Helper: resolve target and intervention variables from raw text fragments."""
+    target = _match_column(target_raw, col_re, available_columns)
+    if not target:
+        return None
+
+    do_vars = {}
+    parts = re.split(r'\s+and\s+', conditions_raw)
+    for part in parts:
+        m = re.search(
+            r'(.+?)\s+(?:is|to|=|equals?)\s+(' + value_words + r')',
+            part.strip()
+        )
+        if m:
+            col_raw = m.group(1).strip()
+            val = m.group(2).strip()
+            col = _match_column(col_raw, col_re, available_columns)
+            if col:
+                do_vars[col] = val
+
+    if not do_vars:
+        return None
+
+    return {'target': target, 'do_vars': do_vars}
+
+
+def _match_column(text: str, col_re: re.Pattern, available_columns: List[str]) -> Optional[str]:
+    """Find the best matching column name in a text fragment."""
+    m = col_re.search(text)
+    if m:
+        matched = m.group(0)
+        for col in available_columns:
+            if col.lower() == matched.lower():
+                return col
+    return None
+
+
+def _resolve_intervention_values(engine: 'CausalIFEngine', do_vars: Dict[str, str]) -> Dict[str, str]:
+    """
+    Map descriptive intervention values ('high', 'low', 'medium') to the
+    discretized bin labels ('0', '1', '2', ...) used by the fitted model.
+
+    If the causal model has not been fitted yet, returns the raw values as-is
+    with a warning — the caller is expected to validate model readiness before
+    invoking do-operator queries.
+    """
+    if engine.causal_model is None:
+        logger.warning(
+            "Causal model is not fitted. Cannot resolve intervention values to bin labels. "
+            "Run a causal analysis query first so the CausalIF pipeline builds the model."
+        )
+        return do_vars
+
+    resolved = {}
+    model_nodes = set(engine.causal_model.nodes())
+
+    for var, val in do_vars.items():
+        if var not in model_nodes:
+            resolved[var] = val
+            continue
+
+        cpd = engine.causal_model.get_cpds(var)
+        states = [str(s) for s in cpd.state_names[var]]
+
+        if val in states:
+            resolved[var] = val
+            continue
+
+        val_lower = val.lower().strip()
+        n = len(states)
+
+        if val_lower in ('low', 'very low'):
+            resolved[var] = states[0]
+        elif val_lower == 'medium':
+            resolved[var] = states[n // 2]
+        elif val_lower in ('high', 'very high'):
+            resolved[var] = states[-1]
+        else:
+            try:
+                idx = int(val_lower)
+                if 0 <= idx < n:
+                    resolved[var] = states[idx]
+                else:
+                    resolved[var] = val
+            except ValueError:
+                resolved[var] = val
+
+    return resolved
+
+
+def causalif_intervene(query: str) -> Dict:
+    """
+    Handle an interventional (do-operator) query.
+
+    Requires that the CausalIF pipeline has already been run at least once
+    (so the causal model is fitted) and that ``enable_causal_estimate=True``.
+
+    Args:
+        query: Natural language interventional question.
+
+    Returns:
+        Dict with do-operator results or an error message.
+    """
+    engine = _get_engine()
+
+    if engine is None:
+        return {
+            'success': False,
+            'error': 'No CausalIF engine configured. Call set_causalif_engine() first.',
+        }
+
+    if not engine.enable_causal_estimate:
+        return {
+            'success': False,
+            'error': (
+                'Causal inference is disabled. '
+                'Set enable_causal_estimate=True in set_causalif_engine() to use interventional queries.'
+            ),
+        }
+
+    if engine.causal_model is None or engine.causal_inference_engine is None:
+        return {
+            'success': False,
+            'error': (
+                'Causal model has not been fitted yet. '
+                'Run a causal analysis query first (e.g. "what causes high shipping_cost") '
+                'so that the full CausalIF pipeline builds the model.'
+            ),
+        }
+
+    model_nodes = sorted(engine.causal_model.nodes())
+
+    parsed = parse_intervention_query(query, model_nodes)
+    if parsed is None:
+        return {
+            'success': False,
+            'error': (
+                f'Could not parse interventional query: "{query}". '
+                f'Try a format like: "what happens to Y if X is high". '
+                f'Available variables: {model_nodes}'
+            ),
+        }
+
+    target = parsed['target']
+    do_vars = _resolve_intervention_values(engine, parsed['do_vars'])
+
+    logger.info(f"[Interventional Query] target={target}, do={do_vars}")
+
+    try:
+        result = engine.do(target=target, do_vars=do_vars)
+
+        if 'error' in result:
+            return {
+                'success': False,
+                'error': result['message'],
+                'suggestion': result.get('suggestion', ''),
+                'target': target,
+                'do_vars': do_vars,
+                'summary': f"⚠️ {result['message']}\n💡 {result.get('suggestion', '')}",
+            }
+
+        return _build_intervention_summary(result, target, do_vars)
+
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'do-operator failed: {str(e)}',
+            'target': target,
+            'do_vars': do_vars,
+        }
+
+
+def _build_intervention_summary(result: Dict, target: str, do_vars: Dict) -> Dict:
+    """Build the human-readable summary dict for an interventional query result."""
+    do_str = ', '.join(f'{k}={v}' for k, v in do_vars.items())
+    summary = f"🔬 Interventional Analysis: P({target} | do({do_str}))\n"
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    display_dist = result.get('distribution_with_ranges', result['distribution'])
+    raw_dist = result['distribution']
+    sorted_keys = sorted(raw_dist.keys(), key=lambda k: -raw_dist[k])
+
+    for state in sorted_keys:
+        prob = raw_dist[state]
+        bar = '█' * int(prob * 20) + '░' * (20 - int(prob * 20))
+        marker = ' ◀ most likely' if state == result['most_likely_value'] else ''
+        display_key = next((dk for dk in display_dist if dk == state or dk.startswith(f"bin {state} ")), state)
+        summary += f"  {target}={display_key}: |{bar}| {prob:.4f}{marker}\n"
+
+    most_likely_display = result.get('most_likely_display', result['most_likely_value'])
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    summary += f"  → Most likely outcome: {target} = {most_likely_display} (p={result['max_probability']:.4f})"
+
+    return {
+        'success': True,
+        'query_type': 'intervention',
+        'target': target,
+        'do_vars': do_vars,
+        'distribution': result['distribution'],
+        'distribution_with_ranges': result.get('distribution_with_ranges', {}),
+        'most_likely_value': result['most_likely_value'],
+        'most_likely_display': most_likely_display,
+        'max_probability': result['max_probability'],
+        'summary': summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# causalif() helper functions (split from the monolithic function)
+# ---------------------------------------------------------------------------
+
+def _validate_engine_and_dataframe(engine: CausalIFEngine) -> List[str]:
+    """Validate engine state and return available columns. Raises on failure."""
+    if engine.dataframe is None:
+        raise ValueError(
+            "Dataframe is not available. CausalIF causal analysis requires observational data.\n"
+            "Please configure the CausalIF engine with a dataframe using:\n"
+            "  set_causalif_engine(model=..., dataframe=your_dataframe, ...)\n"
+            "The dataframe should contain the factors you want to analyze."
+        )
+    if hasattr(engine.dataframe, "columns"):
+        return list(engine.dataframe.columns)
+    return list(engine.dataframe)
+
+
+def _build_combined_factors(engine: CausalIFEngine, available_columns: List[str]) -> List[str]:
+    """Return the deduplicated factor list from the engine.
+
+    engine.related_factors already contains related_factors + dataframe columns
+    (merged in set_causalif_engine), so we just return it directly.
+    """
+    if engine.related_factors:
+        return list(dict.fromkeys(engine.related_factors))
+    return list(dict.fromkeys(available_columns))
+
+
+def _extract_causal_relationships(engine: CausalIFEngine, causal_graph, target_factor: str):
+    """Walk causal graph edges and build relationship / influence / effect lists."""
+    causal_relationships = []
+    target_influences = []
+    target_effects = []
+
+    for factor_a, factor_b in causal_graph.edges():
+        edge_data = causal_graph[factor_a][factor_b] if causal_graph.has_edge(factor_a, factor_b) else {}
+        llm_confidence = edge_data.get('prior_strength', None)
+
+        path_a = engine.get_relationship_path(causal_graph, target_factor, factor_a)
+        path_b = engine.get_relationship_path(causal_graph, target_factor, factor_b)
+        degree_a = len(path_a) - 1 if path_a else float('inf')
+        degree_b = len(path_b) - 1 if path_b else float('inf')
+        min_degree = min(degree_a, degree_b)
+
+        evidence_description = "Causal relationship discovered by CausalIF algorithm"
+        if llm_confidence is not None:
+            evidence_description += f" (LLM confidence: {llm_confidence:.3f})"
+
+        relationship = {
+            'cause': factor_a,
+            'effect': factor_b,
+            'evidence': evidence_description,
+            'llm_confidence': llm_confidence,
+            'relationship_type': 'causal',
+            'discovered_by': 'CausalIF_with_Bayesian_inference',
+            'degree_from_target': min_degree,
+            'path_to_target': path_a if degree_a <= degree_b else path_b,
+        }
+        causal_relationships.append(relationship)
+
+        if factor_b == target_factor:
+            target_influences.append({
+                'influencing_factor': factor_a,
+                'evidence': evidence_description,
+                'llm_confidence': llm_confidence,
+                'relationship': relationship,
+                'degree': degree_a,
+            })
+
+        if factor_a == target_factor:
+            target_effects.append({
+                'affected_factor': factor_b,
+                'evidence': evidence_description,
+                'llm_confidence': llm_confidence,
+                'relationship': relationship,
+                'degree': degree_b,
+            })
+
+    target_influences.sort(key=lambda x: x.get('degree', float('inf')))
+    target_effects.sort(key=lambda x: x.get('degree', float('inf')))
+    return causal_relationships, target_influences, target_effects
+
+
+def _build_network_summary(engine: CausalIFEngine, skeleton_graph, causal_graph,
+                           target_influences, target_effects, degrees_analysis,
+                           max_degrees, max_parallel_queries) -> Dict:
+    """Assemble the network_summary dict."""
+    return {
+        'total_factors': len(causal_graph.nodes()),
+        'total_causal_relationships': len(causal_graph.edges()),
+        'factors_influencing_target': len(target_influences),
+        'factors_affected_by_target': len(target_effects),
+        'skeleton_edges': len(skeleton_graph.edges()),
+        'causal_edges': len(causal_graph.edges()),
+        'edge_removal_rate': 1 - (len(causal_graph.edges()) / max(1, len(skeleton_graph.edges()))),
+        'max_degrees_analyzed': max_degrees,
+        'max_parallel_queries_used': max_parallel_queries,
+        'rag_retriever_used': engine.retriever_tool is not None or engine.retriever is not None,
+        'bayesian_inference_used': True,
+        'actual_max_degree_found': degrees_analysis.get('max_degree_found', 0),
+        'factors_by_degree': degrees_analysis.get('factors_by_degree', {}),
+        'rag_document_stats': engine.rag_document_stats,
+    }
+
+
+def _build_insights(engine: CausalIFEngine, skeleton_graph, causal_graph,
+                    analysis_factors, target_factor, target_influences,
+                    max_parallel_queries) -> List[str]:
+    """Build the causalif_insights list."""
+    insights = [
+        f"✓ Bayesian Framework: PRIOR (skeleton) → POSTERIOR (directed graph)",
+        f"✓ PRIOR: {len(skeleton_graph.edges())} associations from LLM + RAG",
+        f"✓ POSTERIOR: {len(causal_graph.edges())} causal directions from Bayesian inference",
+        f"✓ Analyzed {len(analysis_factors)} factors with {max_parallel_queries} parallel queries",
+    ]
+
+    if engine.retriever_tool or engine.retriever:
+        insights.append("✓ RAG retrieval enabled for domain knowledge in PRIOR")
+        if engine.rag_document_stats:
+            all_sources = set()
+            for s in engine.rag_document_stats.values():
+                all_sources.update(s.get('source_uris', []))
+            if all_sources:
+                insights.append(f"✓ RAG matched {len(all_sources)} unique source documents across all edge queries")
+
+    if engine.dataframe is not None:
+        insights.append(f"✓ Observational data ({len(engine.dataframe)} samples) used for POSTERIOR")
+
+    if target_influences:
+        insights.append(f"✓ Found {len(target_influences)} factors causally influencing {target_factor}")
+
+    return insights
+
+
+def _build_summary_text(engine: CausalIFEngine, skeleton_graph, causal_graph,
+                        target_factor, target_influences, max_degrees) -> str:
+    """Build the human-readable summary string."""
+    summary = f"✅ Bayesian CausalIF Causal Analysis Complete\n"
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    summary += f"🎯 Target Factor: {target_factor}\n"
+    summary += f"📊 PRIOR (Associations): {len(skeleton_graph.edges())} edges\n"
+    summary += f"🔗 POSTERIOR (Causal): {len(causal_graph.edges())} directed edges\n"
+    summary += f"⚡ Influencing Factors: {len(target_influences)}\n"
+
+    # RAG document stats
+    if engine.rag_document_stats:
+        all_sources = set()
+        total_chunks = 0
+        for s in engine.rag_document_stats.values():
+            all_sources.update(s.get('source_uris', []))
+            total_chunks += s.get('chunks_retrieved', 0)
+        if all_sources:
+            summary += f"📄 RAG Documents Matched: {len(all_sources)} unique sources ({total_chunks} total chunks)\n"
+        elif total_chunks > 0:
+            summary += f"📄 RAG Chunks Retrieved: {total_chunks} (pass raw retriever for source count)\n"
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Top causal influences
+    if target_influences:
+        summary += f"\n🔍 BAYESIAN CAUSAL ANALYSIS RESULTS:\n"
+        summary += f"The following factors were identified as causal drivers\n"
+        summary += f"through Bayesian structure learning:\n\n"
+
+        sorted_influences = sorted(
+            [inf for inf in target_influences if inf.get('llm_confidence') is not None],
+            key=lambda x: x.get('llm_confidence', 0),
+            reverse=True,
+        )
+
+        if sorted_influences:
+            for i, inf in enumerate(sorted_influences, 1):
+                confidence = inf.get('llm_confidence', 0)
+                max_possible = max(confidence, 3)
+                norm_confidence = min(confidence / max_possible, 1.0) if max_possible > 0 else 0
+                strength_bar = "█" * int(norm_confidence * 10) + "░" * (10 - int(norm_confidence * 10))
+                confidence_label = "HIGH" if confidence >= 3 else "MODERATE" if confidence >= 2 else "LOW"
+                summary += f"{i}. {inf['influencing_factor']} → {target_factor}\n"
+                summary += f"   LLM Confidence: |{strength_bar}| {confidence:.1f} ({confidence_label}) — {int(confidence)} of {int(max_possible)} KBs agreed\n"
+                summary += f"   {inf.get('evidence', 'No statistical evidence available')}\n\n"
+        else:
+            summary += "⚠️ No causal influences with quantified confidence were found.\n"
+            summary += "This may indicate:\n"
+            summary += "- The Bayesian method rejected weak associations\n"
+            summary += "- Data quality issues\n"
+            summary += "- The target factor may be independent of analyzed factors\n\n"
+    else:
+        summary += f"\n⚠️ No direct causal influences found for {target_factor}\n"
+        summary += f"The Bayesian analysis did not identify any factors that\n"
+        if max_degrees is not None:
+            summary += f"causally influence {target_factor} within {max_degrees} degree(s).\n\n"
+        else:
+            summary += f"causally influence {target_factor}.\n\n"
+
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    summary += f"📌 INTERPRETATION GUIDE:\n"
+    summary += f"• Use ONLY the factors listed above in your analysis\n"
+    summary += f"• LLM confidence indicates how many knowledge bases agreed the edge exists\n"
+    summary += f"• Higher confidence = more knowledge sources support this relationship\n"
+    summary += f"• Bayesian method determines causal directions from data\n"
+    summary += f"• LLM confidence is NOT causal effect size — it is edge existence agreement\n"
+    summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return summary
+
+
+def _build_error_result(query: str, error: str) -> Dict:
+    """Build the standard error result dict."""
+    return {
+        'target_factor': None,
+        'related_factors': [],
+        'skeleton_graph': {'nodes': [], 'edges': []},
+        'causal_graph': {'nodes': [], 'edges': []},
+        'degrees_analysis': {},
+        'causal_relationships': [],
+        'strongest_causal_influences': [],
+        'network_summary': {},
+        'visualization_data': {},
+        'causalif_insights': [f"Error in CausalIF analysis: {error}"],
+        'recommendations': [],
+        'algorithm_details': {'error': error},
+        'max_degrees_used': 3,
+        'max_parallel_queries_used': 50,
+        'rag_support_enabled': False,
+        'bayesian_inference_enabled': True,
+        'summary': f"❌ CausalIF Analysis Failed: {error}",
+        'llm_interpretation': f"Analysis failed: {error}",
+        'query': query,
+        'success': False,
+    }
 
 
 def causalif(query: str) -> Dict:
@@ -269,161 +791,95 @@ def causalif(query: str) -> Dict:
     """
     
     try:
-        global _global_causalif_engine
+        causalif_engine = _get_engine()
         
-        if _global_causalif_engine is None:
-            print("Warning: No CausalIF engine configured. Raising error")
+        if causalif_engine is None:
+            logger.warning("No CausalIF engine configured. Raising error")
             raise ValueError(
-                f"❌ CausalIF Analysis Failed: {str(e)} \n")
-        
-        causalif_engine = _global_causalif_engine
+                "❌ CausalIF Analysis Failed: No CausalIF engine configured. "
+                "Please call set_causalif_engine() first.\n")
+
+        # Check if this is an interventional (do-operator) query first.
+        # Only route to do-operator if the model is already fitted.
+        # If not fitted, fall through to run a full causal discovery.
+        if causalif_engine.enable_causal_estimate:
+            if causalif_engine.causal_model is not None:
+                model_nodes = sorted(causalif_engine.causal_model.nodes())
+                parsed = parse_intervention_query(query, model_nodes)
+                if parsed is not None:
+                    logger.info("Detected interventional query — routing to do-operator")
+                    return causalif_intervene(query)
+            else:
+                # Check if the query *looks* interventional but model isn't fitted
+                # Use a lightweight keyword check to give a helpful error
+                q_lower = query.lower()
+                intervention_hints = ['what happens', 'what would', 'what if', 'how does',
+                                      'effect of setting', 'if we set']
+                if any(kw in q_lower for kw in intervention_hints):
+                    return {
+                        'success': False,
+                        'error': (
+                            'This looks like an interventional query, but the causal model has not been '
+                            'fitted yet. Run a causal analysis query first (e.g. "what causes high X") '
+                            'so that the full CausalIF pipeline builds the model, then retry your '
+                            'interventional question.'
+                        ),
+                        'query': query,
+                    }
+
         max_degrees = causalif_engine.max_degrees
         max_parallel_queries = causalif_engine.max_parallel_queries
         
-        # Check if dataframe is available - required for causal analysis
-        if causalif_engine.dataframe is None:
-            raise ValueError(
-                "Dataframe is not available. CausalIF causal analysis requires observational data.\n"
-                "Please configure the CausalIF engine with a dataframe using:\n"
-                "  set_causalif_engine(model=..., dataframe=your_dataframe, ...)\n"
-                "The dataframe should contain the factors you want to analyze."
-            )
-        
-        # Get available columns from dataframe
-        if hasattr(causalif_engine.dataframe, "columns"):
-            available_columns = list(causalif_engine.dataframe.columns)
-        else:
-            available_columns = list(causalif_engine.dataframe)
+        available_columns = _validate_engine_and_dataframe(causalif_engine)
+        combined_factors = _build_combined_factors(causalif_engine, available_columns)
 
-        # Create combined list: related_factors + dataframe columns
-        # This allows target factor to be chosen from the full list (including related_factors not in dataframe)
-        combined_factors = []
-        if causalif_engine.related_factors:
-            combined_factors.extend(causalif_engine.related_factors)
-        # Add dataframe columns that aren't already in the list
-        for col in available_columns:
-            if col not in combined_factors:
-                combined_factors.append(col)
-        
-        # Remove duplicates while preserving order
-        combined_factors = list(dict.fromkeys(combined_factors))
-
-        # Extract target factor from query using the combined list
-        #target_factor, _ = extract_factors_from_query(
         target_factor = extract_factors_from_query(
             query, 
-            combined_factors,  # Use combined list instead of just available_columns
+            combined_factors,
             excluded_target_columns=causalif_engine.excluded_target_columns,
-            excluded_related_columns=causalif_engine.excluded_related_columns
         )
         
-        # For CausalIF 1 analysis, use all factors from combined list except target (remove duplicates)
         analysis_factors_all = list(dict.fromkeys([f for f in combined_factors if f != target_factor]))
         
-        print(f"Target factor: {target_factor}")
-        print(f"Analysis factors for CausalIF 1: {len(analysis_factors_all)} factors")
-        print(f"  Combined list includes: {len(causalif_engine.related_factors) if causalif_engine.related_factors else 0} related_factors + {len(available_columns)} dataframe columns")
-        print(f"  Factors: {analysis_factors_all}")
-        print(f"Maximum degrees of separation: {max_degrees}")
-        print(f"Maximum parallel queries: {max_parallel_queries}")
-        print(f"RAG retriever available: {causalif_engine.retriever_tool is not None}")
-        print(f"Bayesian causal inference: ENABLED")
+        logger.info(f"Target factor: {target_factor}")
+        logger.info(f"Analysis factors for CausalIF 1: {len(analysis_factors_all)} factors")
+        logger.info(f"  Combined list includes: {len(causalif_engine.related_factors) if causalif_engine.related_factors else 0} related_factors + {len(available_columns)} dataframe columns")
+        logger.info(f"Maximum degrees of separation: {max_degrees}")
+        logger.info(f"Maximum parallel queries: {max_parallel_queries}")
+        logger.info(f"RAG retriever available: {causalif_engine.retriever_tool is not None or causalif_engine.retriever is not None}")
         
-        # Use combined factors for CausalIF 1 analysis
         analysis_factors = [target_factor] + analysis_factors_all
         domains = causalif_engine.domains
         
-        print(f"\nRunning CausalIF analysis on {len(analysis_factors)} total factors")
-        print(f"Domains: {domains}")
+        logger.info(f"Running CausalIF analysis on {len(analysis_factors)} total factors")
+        logger.info(f"Domains: {domains}")
         
         skeleton_graph, causal_graph = causalif_engine.run_complete_causalif(analysis_factors, domains, target_factor)
         
+        # Get causal inference summary — reuse the one computed inside
+        # run_complete_causalif when enable_causal_estimate is True to avoid
+        # running estimate_causal_effects / estimate_downstream_effects twice.
+        causal_inference_summary = None
+        if causalif_engine.enable_causal_estimate and causalif_engine.causal_inference_engine:
+            causal_inference_summary = causalif_engine.get_causal_summary_lightweight(target_factor, causal_graph)
+        
         degrees_analysis = causalif_engine.analyze_degrees_of_separation(causal_graph, target_factor)
         
-        causal_relationships = []
-        target_influences = []
-        target_effects = []
+        causal_relationships, target_influences, target_effects = _extract_causal_relationships(
+            causalif_engine, causal_graph, target_factor,
+        )
         
-        for edge in causal_graph.edges():
-            factor_a, factor_b = edge[0], edge[1]
-            
-            # Get edge strength if available
-            edge_strength = causal_graph[factor_a][factor_b].get('strength', None) if causal_graph.has_edge(factor_a, factor_b) else None
-            
-            path_a = causalif_engine.get_relationship_path(causal_graph, target_factor, factor_a)
-            path_b = causalif_engine.get_relationship_path(causal_graph, target_factor, factor_b)
-            degree_a = len(path_a) - 1 if path_a else float('inf')
-            degree_b = len(path_b) - 1 if path_b else float('inf')
-            min_degree = min(degree_a, degree_b)
-            
-            # Original CausalIF: Evidence comes from LLM reasoning and Bayesian inference, not correlation
-            evidence_description = f"Causal relationship discovered by CausalIF algorithm"
-            if edge_strength is not None:
-                evidence_description += f" (strength: {edge_strength:.3f})"
-            
-            relationship = {
-                'cause': factor_a,
-                'effect': factor_b,
-                'evidence': evidence_description,
-                'causal_strength': edge_strength,  # Added: Bayesian edge strength
-                'relationship_type': 'causal',
-                'discovered_by': 'CausalIF_with_Bayesian_inference',
-                'degree_from_target': min_degree,
-                'path_to_target': path_a if degree_a <= degree_b else path_b
-            }
-            causal_relationships.append(relationship)
-            
-            if factor_b == target_factor:
-                target_influences.append({
-                    'influencing_factor': factor_a,
-                    'evidence': evidence_description,
-                    'causal_strength': edge_strength, 
-                    'relationship': relationship,
-                    'degree': degree_a
-                })
-            
-            if factor_a == target_factor:
-                target_effects.append({
-                    'affected_factor': factor_b,
-                    'evidence': evidence_description,
-                    'causal_strength': edge_strength, 
-                    'relationship': relationship,
-                    'degree': degree_b
-                })
+        network_summary = _build_network_summary(
+            causalif_engine, skeleton_graph, causal_graph,
+            target_influences, target_effects, degrees_analysis,
+            max_degrees, max_parallel_queries,
+        )
         
-        target_influences.sort(key=lambda x: x.get('degree', float('inf')))
-        target_effects.sort(key=lambda x: x.get('degree', float('inf')))
-        
-        network_summary = {
-            'total_factors': len(causal_graph.nodes()),
-            'total_causal_relationships': len(causal_graph.edges()),
-            'factors_influencing_target': len(target_influences),
-            'factors_affected_by_target': len(target_effects),
-            'skeleton_edges': len(skeleton_graph.edges()),
-            'causal_edges': len(causal_graph.edges()),
-            'edge_removal_rate': 1 - (len(causal_graph.edges()) / max(1, len(skeleton_graph.edges()))),
-            'max_degrees_analyzed': max_degrees,
-            'max_parallel_queries_used': max_parallel_queries,
-            'rag_retriever_used': causalif_engine.retriever_tool is not None,
-            'bayesian_inference_used': True,
-            'actual_max_degree_found': degrees_analysis.get('max_degree_found', 0),
-            'factors_by_degree': degrees_analysis.get('factors_by_degree', {})
-        }
-        
-        causalif_insights = []
-        causalif_insights.append(f"✓ Bayesian Framework: PRIOR (skeleton) → POSTERIOR (directed graph)")
-        causalif_insights.append(f"✓ PRIOR: {len(skeleton_graph.edges())} associations from LLM + RAG")
-        causalif_insights.append(f"✓ POSTERIOR: {len(causal_graph.edges())} causal directions from Bayesian inference")
-        causalif_insights.append(f"✓ Analyzed {len(analysis_factors)} factors with {max_parallel_queries} parallel queries")
-        
-        if causalif_engine.retriever_tool:
-            causalif_insights.append(f"✓ RAG retrieval enabled for domain knowledge in PRIOR")
-        
-        if causalif_engine.dataframe is not None:
-            causalif_insights.append(f"✓ Observational data ({len(causalif_engine.dataframe)} samples) used for POSTERIOR")
-        
-        if target_influences:
-            causalif_insights.append(f"✓ Found {len(target_influences)} factors causally influencing {target_factor}")
+        causalif_insights = _build_insights(
+            causalif_engine, skeleton_graph, causal_graph,
+            analysis_factors, target_factor, target_influences,
+            max_parallel_queries,
+        )
         
         recommendations = []
         if target_influences:
@@ -433,141 +889,33 @@ def causalif(query: str) -> Dict:
         algorithm_details = {
             'method': 'Bayesian CausalIF (Prior → Posterior)',
             'prior_method': 'LLM + RAG for edge existence (CausalIF 1)',
-            'posterior_method': 'Bayesian structure learning with BDeu score (CausalIF 2))',
+            'posterior_method': 'Bayesian structure learning with BDeu score (CausalIF 2)',
             'orientation_algorithm': 'Hill Climbing constrained by prior skeleton',
             'bayesian_score': 'BDeu (Bayesian Dirichlet equivalent uniform)',
             'prior_constraint': 'Skeleton graph from CausalIF 1',
             'max_degrees': max_degrees,
-            'parallel_queries': max_parallel_queries
+            'parallel_queries': max_parallel_queries,
         }
         
-        summary = f"✅ Bayesian CausalIF Causal Analysis Complete\n"
-        summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        summary += f"🎯 Target Factor: {target_factor}\n"
-        summary += f"📊 PRIOR (Associations): {len(skeleton_graph.edges())} edges\n"
-        summary += f"🔗 POSTERIOR (Causal): {len(causal_graph.edges())} directed edges\n"
-        summary += f"⚡ Influencing Factors: {len(target_influences)}\n"
-        summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        
-        # Add top causal influences with strengths
-        if target_influences:
-            summary += f"\n🔍 BAYESIAN CAUSAL ANALYSIS RESULTS:\n"
-            summary += f"The following factors were identified as causal drivers\n"
-            summary += f"through Bayesian structure learning:\n\n"
-            
-            # Sort by causal strength (descending)
-            sorted_influences = sorted(
-                [inf for inf in target_influences if inf.get('causal_strength') is not None],
-                key=lambda x: x.get('causal_strength', 0),
-                reverse=True
-            )
-            
-            if sorted_influences:
-                for i, inf in enumerate(sorted_influences, 1):
-                    strength = inf.get('causal_strength', 0)
-                    strength_bar = "█" * int(strength * 10) + "░" * (10 - int(strength * 10))
-                    strength_label = "STRONG" if strength > 0.7 else "MODERATE" if strength > 0.4 else "WEAK" if strength > 0.2 else "VERY WEAK"
-                    summary += f"{i}. {inf['influencing_factor']} → {target_factor}\n"
-                    summary += f"   Causal Strength: |{strength_bar}| {strength:.3f} ({strength_label})\n"
-                    summary += f"   {inf.get('evidence', 'No statistical evidence available')}\n\n"
-            else:
-                summary += "⚠️ No causal influences with quantified strengths were found.\n"
-                summary += "This may indicate:\n"
-                summary += "- The Bayesian method rejected weak associations\n"
-                summary += "- Data quality issues\n"
-                summary += "- The target factor may be independent of analyzed factors\n\n"
-        else:
-            summary += f"\n⚠️ No direct causal influences found for {target_factor}\n"
-            summary += f"The Bayesian analysis did not identify any factors that\n"
-            if max_degrees is not None:
-                summary += f"causally influence {target_factor} within {max_degrees} degree(s).\n\n"
-            else:
-                summary += f"causally influence {target_factor}.\n\n"
-        
-        # Add interpretation guidance
-        summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        summary += f"📌 INTERPRETATION GUIDE:\n"
-        summary += f"• Use ONLY the factors listed above in your analysis\n"
-        summary += f"• Causal strength indicates the LLM-based prior confidence\n"
-        summary += f"• Higher strength = stronger domain knowledge support\n"
-        summary += f"• Bayesian method determines causal directions from data\n"
-        summary += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        
-        # DEBUG: Show results for different max_degrees (1-5)
-        print(f"\n{'='*80}")
-        print(f"DEGREE ANALYSIS: Showing results for max_degrees 1 through 5")
-        print(f"{'='*80}")
-        
-        for test_degree in range(1, 6):
-            print(f"\n--- Max Degrees = {test_degree} ---")
-            
-            # Filter the causal graph by this degree
-            test_filtered_graph = causalif_engine.filter_graph_by_degrees(causal_graph, target_factor, test_degree)
-            
-            # Count edges and nodes
-            num_nodes = len(test_filtered_graph.nodes())
-            num_edges = len(test_filtered_graph.edges())
-            
-            # Find influences at this degree
-            test_influences = []
-            for u, v in test_filtered_graph.edges():
-                if v == target_factor:
-                    edge_data = test_filtered_graph[u][v]
-                    test_influences.append({
-                        'factor': u,
-                        'strength': edge_data.get('strength', 0) or 0  # Use 'strength' key from edge data
-                    })
-            
-            print(f"  Nodes: {num_nodes}, Edges: {num_edges}")
-            print(f"  Factors influencing {target_factor}: {len(test_influences)}")
-            
-            if test_influences:
-                # Sort by strength
-                test_influences.sort(key=lambda x: x.get('strength', 0) or 0, reverse=True)
-                for inf in test_influences:
-                    strength = inf.get('strength', 0) or 0
-                    strength_bar = "█" * int(strength * 10) + "░" * (10 - int(strength * 10))
-                    print(f"    • {inf['factor']:30s} |{strength_bar}| {strength:.3f}")
-            else:
-                print(f"    (No direct influences found)")
-        
-        print(f"{'='*80}\n")
+        summary = _build_summary_text(
+            causalif_engine, skeleton_graph, causal_graph,
+            target_factor, target_influences, max_degrees,
+        )
         
         visualization_data = {
             'skeleton': {
                 'nodes': list(skeleton_graph.nodes()),
-                'edges': list(skeleton_graph.edges())
+                'edges': list(skeleton_graph.edges()),
             },
             'causal': {
                 'nodes': list(causal_graph.nodes()),
-                'edges': [(u, v, causal_graph[u][v]) for u, v in causal_graph.edges()]  # Include edge attributes
-            }
+                'edges': [(u, v, causal_graph[u][v]) for u, v in causal_graph.edges()],
+            },
         }
-        
-        # Generate LLM interpretation of the causal graph
-        llm_interpretation = ""
-        if causalif_engine.model is not None:
-            try:
-                llm_interpretation = generate_llm_interpretation(
-                    causalif_result={
-                        'success': True,
-                        'target_factor': target_factor,
-                        'causal_relationships': causal_relationships,
-                        'strongest_causal_influences': target_influences,
-                        'network_summary': network_summary
-                    },
-                    original_query=query,
-                    model=causalif_engine.model
-                )
-            except Exception as e:
-                print(f"Warning: Could not generate LLM interpretation: {e}")
-                llm_interpretation = "LLM interpretation unavailable."
-        else:
-            llm_interpretation = "LLM model not configured. Use set_causalif_engine() to enable interpretation."
         
         return {
             'target_factor': target_factor,
-            'related_factors': analysis_factors_all,  # Fixed: use analysis_factors_all instead of undefined related_factors
+            'related_factors': analysis_factors_all,
             'skeleton_graph': visualization_data['skeleton'],
             'causal_graph': visualization_data['causal'],
             'degrees_analysis': degrees_analysis,
@@ -580,89 +928,50 @@ def causalif(query: str) -> Dict:
             'algorithm_details': algorithm_details,
             'max_degrees_used': max_degrees,
             'max_parallel_queries_used': max_parallel_queries,
-            'rag_support_enabled': causalif_engine.retriever_tool is not None,
+            'rag_support_enabled': causalif_engine.retriever_tool is not None or causalif_engine.retriever is not None,
             'bayesian_inference_enabled': True,
             'summary': summary,
-            'llm_interpretation': llm_interpretation,  
+            'llm_interpretation': '',
+            'causal_inference_summary': causal_inference_summary,
             'query': query,
-            'success': True
+            'success': True,
         }
         
     except Exception as e:
-        return {
-            'target_factor': None,
-            'related_factors': [],
-            'skeleton_graph': {'nodes': [], 'edges': []},
-            'causal_graph': {'nodes': [], 'edges': []},
-            'degrees_analysis': {},
-            'causal_relationships': [],
-            'strongest_causal_influences': [],
-            'network_summary': {},
-            'visualization_data': {},
-            'causalif_insights': [f"Error in CausalIF analysis: {str(e)}"],
-            'recommendations': [],
-            'algorithm_details': {'error': str(e)},
-            'max_degrees_used': 3,
-            'max_parallel_queries_used': 50,
-            'rag_support_enabled': False,
-            'bayesian_inference_enabled': True,
-            'summary': f"❌ CausalIF Analysis Failed: {str(e)}",
-            'llm_interpretation': f"Analysis failed: {str(e)}",
-            'query': query,
-            'success': False
-        }
+        logger.exception(f"CausalIF Analysis Failed: {e}")
+        return _build_error_result(query, str(e))
 
 @tool
 def causalif_tool(query: str) -> Dict:
     """
-    Executes the CausalIF (Causal Inference Framework) pipeline with Bayesian causal inference. 
-    Initializes the CausalIF engine with a Bedrock model and retriever, runs the query, 
-    and returns structured results including a summary.
-    
-    Dataframe Selection Logic:
-    - If 'ftg' in query → merge df_ftg + df_pva
-    - If 'uvp' in query → use df_uvp
-    - Otherwise → use df_pva (default)
+    Executes the CausalIF (Causal Inference Framework) pipeline with Bayesian causal inference.
+    This is a LangChain tool wrapper around the causalif() function.
+
+    Returns the same result dict as causalif(), with an additional LLM interpretation
+    (only generated in agentic tool use, not in library/notebook use).
+
+    Note: You must configure the CausalIF engine first using set_causalif_engine()
+    with your model, retriever, and dataframe.
 
     Args:
         query (str): The natural language query to process.
 
     Returns:
-        Dict: A dictionary containing the full results and a summary.
+        Dict: A dictionary containing summary, structured results, and graph data.
     """
-    try:
-        # Import dataframes from tool_create_df
-        import tool_create_df as df_module
-        
-        # Intelligent dataframe selection based on query content
-        query_lower = query.lower()
-        
-        # Verify dataframe is not None
-        if dataframe_to_use is None:
-            print("Warning: Selected dataframe is None, POSTERIOR will not be computed")
-        else:
-            print(f"Using dataframe with shape: {dataframe_to_use.shape}")
-            print(f"All columns ({len(dataframe_to_use.columns)}): {list(dataframe_to_use.columns)}")
-        
-        result = causalif(query)
-        fig = visualize_causalif_results(result)
-        if fig:
-            # Add timestamp and query info to the visualization
-            import datetime
-            viz_data = {
-                'figure': fig,
-                'query': query,
-                'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'target_factor': result.get('target_factor', 'Unknown')
-            }
+    result = causalif(query)
 
-        return {
-            "summary": result['summary']
-        }
-        
-    except Exception as e:
-        print(f"Example execution failed: {e}")
-        print("Please configure with your actual model, retriever, and data using set_causalif_engine()")
-        return {
-            "summary": f"Error: {str(e)}"
-        }
+    if result.get('success'):
+        engine = _get_engine()
+        if engine and engine.model is not None:
+            try:
+                result['llm_interpretation'] = generate_llm_interpretation(
+                    causalif_result=result,
+                    original_query=query,
+                    model=engine.model,
+                )
+            except Exception as e:
+                logger.warning(f"Could not generate LLM interpretation: {e}")
+                result['llm_interpretation'] = "LLM interpretation unavailable."
+
+    return result

@@ -27,6 +27,7 @@ CausalIF combines LLMs with Bayesian causal inference to discover causal relatio
 - **Background Knowledge**: LLM's pre-trained causal understanding
 - **Document Knowledge**: Domain documents via RAG retrieval
 - **Bayesian Structure Learning**: Hill Climbing + BDeu scoring for causal orientation
+- **Do-Calculus**: Interventional queries via pgmpy's do-operator (`causalif_intervene`)
 
 Best used as a tool in agentic systems for interpreting causal relationships.
 
@@ -55,7 +56,7 @@ CausalIF works best when you have both qualitative domain knowledge and quantita
 **When Not to Use**:
 ⚠️ No domain documents  
 ⚠️ Real-time requirements  
-⚠️ <10 data samples  
+⚠️ <100 data samples  
 ⚠️ Purely experimental data (use RCTs)
 
 ---
@@ -81,19 +82,24 @@ CausalIF implements a 3-stage algorithm:
 
 ### Stage 2: Causal Orientation (CausalIF 2)
 
-**Goal**: Determine causal direction (A → B or B ← A)
+**Goal**: Determine causal direction (A → B or B ← A) and validate edge robustness
 
-**Process**: Hill Climbing + BDeu scoring constrained by skeleton graph
+**Process**:
+1. **Hill Climbing + BDeu**: Orient skeleton edges using `PriorWeightedBDeu` scoring on observational data
+2. **Bootstrap Stability**: Resample data N times (default 50), re-run Hill Climb on each resample, compute per-edge directed stability (% of resamples where exact edge direction appeared)
+3. **Pruning**: Remove edges with directed stability below threshold (default 70%)
 
-**Output**: Directed Acyclic Graph (DAG)
+**Output**: Directed Acyclic Graph (DAG) with bootstrap-validated edges
 
 ### Stage 3: Causal Inference (Optional)
 
-**Goal**: Quantify causal effects
+**Goal**: Quantify causal effects and enable interventional queries
 
-**Process**: Fit CPDs → Compute Average Treatment Effects → Enable interventional queries
+**Process**: Fit CPDs → Compute Average Treatment Effects → Direction analysis → Enable do-operator queries
 
 **Enable with**: `enable_causal_estimate=True`
+
+The do-operator computes `P(target | do(cause=value))` using pgmpy's backdoor adjustment. Direction analysis compares the intervention direction (cause pushed above/below its baseline) with the effect shift to determine if variables are directly or inversely related. The do-operator only works in the causal direction (ancestor → descendant); querying the reverse returns a helpful error with a suggestion.
 
 ---
 
@@ -105,7 +111,7 @@ Local search algorithm that iteratively improves graph structure. Advantages: in
 ### BDeu Score
 Bayesian scoring function measuring how well a graph explains data. Advantages: combines priors with data, score equivalence, built-in regularization.
 
-**CausalIF Enhancement**: `Score(G) = BDeu(G | Data) + λ × Prior(G | LLM)`
+**CausalIF Enhancement**: `Score(G) = BDeu(G | Data) + λ × Prior(G | LLM)`, validated by bootstrap stability
 
 Implements Bayesian inference: **P(G | Data, LLM) ∝ P(Data | G) × P(G | LLM)**
 
@@ -131,7 +137,7 @@ retriever = AmazonKnowledgeBasesRetriever(
 
 # LLM
 model = ChatBedrockConverse(
-    model_id="us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+    model_id="global.anthropic.claude-sonnet-4-6",
     temperature=0.0,
     region_name="us-west-2"
 )
@@ -181,7 +187,9 @@ set_causalif_engine(
             related_factors=None,  # Add custom related factors here (will be appended with dataframe columns). Mostly derived columns from documents
             selected_dataframe_columns=None, # list of columns from your dataframe if you dont want the whole dataframe to be analyzed.
             enable_causal_estimate = True,  #Causal inference to find upstream or downstream direct effects of the target factor.
-            domains = <lsit of industry domains> # Consider this manadatory for the model to apply adequate background knowledge
+            domains = <list of industry domains>, # Consider this mandatory for the model to apply adequate background knowledge
+            bootstrap_iterations=50, # Number of bootstrap resamples for edge stability validation (0 to disable)
+            bootstrap_threshold=0.7, # Prune edges with directed stability below this threshold
         )
 
 # 4. Run causal analysis
@@ -235,6 +243,42 @@ result = causalif.causalif("factors affecting sleep_hours")
 result = causalif.causalif("factors influencing market_volatility")
 ```
 
+### Interventional Queries (do-operator)
+
+Once the causal model is fitted (`enable_causal_estimate=True` and a causal discovery query has been run), you can ask interventional questions using `causalif_intervene`:
+
+```python
+from causalif import causalif_intervene
+
+"""
+Allowed intervention formats (where X is cause, Y is effect):
+
+1. what happens to Y if X is (high|low|medium)
+2. what would Y be if X is (high|low|medium)
+3. how does Y change if X is (high|low|medium)
+4. effect of setting X to (high|low|medium) on Y
+5. what happens to Y if X is (high|low|medium) and Z is (high|low|medium)
+"""
+
+# Format 1: What happens questions
+result = causalif_intervene("what happens to asp if our_price is high")
+print(result['summary'])
+
+# Format 2: What would questions
+result = causalif_intervene("what would productivity be if stress_level is low")
+
+# Format 3: How does questions
+result = causalif_intervene("how does revenue change if marketing_spend is high")
+
+# Format 4: Effect of setting
+result = causalif_intervene("effect of setting interest_rate to low on bond_price")
+
+# Format 5: Multiple interventions
+result = causalif_intervene("what happens to Y if X is low and Z is high")
+```
+
+Note: The do-operator only works in the causal direction. If `A → B` in the graph, you can query `do(A)` on `B`, but not `do(B)` on `A`.
+
 
 ### Visualization Features
 
@@ -248,24 +292,13 @@ The interactive visualization includes:
 
 ```python
 fig = visualize_causalif_results(result)
-
-# Customize visualization
-fig.update_layout(
-    title="Custom Title",
-    width=1200,
-    height=800
-)
-
-# Save to file
-fig.write_html("causal_graph.html")
-fig.write_image("causal_graph.png")  # Requires kaleido
 ```
 
 ---
 
 ## Architecture
 
-![Library Architecture](docs/overall_design.png)
+![Overall Architecture](docs/overall_design.png)
 
 **Layers**: Agent → CausalIF Tool → Engine → Knowledge (RAG + LLM) → Data
 
@@ -285,11 +318,13 @@ causalif/
 
 **Not ideal for**: Pure quantitative data or feedback-loop driven inference. Built for hybrid qualitative + quantitative analysis.
 
-**Data**: Min 100 samples recommended, 10-20 variables max without filtering, O(n² × k) complexity
+**Data**: Min 100 samples recommended, 10-20 variables max run at a time, Complexity is O(n² × k)
 
 **LLM**: May hallucinate, reflects training biases, 2-5 calls per variable pair
 
 **Assumptions**: DAG structure (no cycles), no unmeasured confounders, conditional independence
+
+**Do-operator**: Only works in causal direction (ancestor → descendant), not reverse
 
 **Mitigation**: Use `max_degrees` for filtering, `temperature=0` for consistency, validate with domain expertise
 
@@ -312,8 +347,9 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
-- **v0.1.9.5**:Allowing LLM to implement indirect and direct associations following LACR 1 algorithm.
-- **v0.1.9**: Remeved LLM based causal directions and introduced bayesian based causal direction with hill climb search and immediate upstream and downstream effects. Building a hybrid graph with associations and causal directions.
+- **v0.1.9.6**: Bootstrap stability validation in CausalIF 2 (resample + re-run Hill Climb, prune edges below 70% directed stability).
+- **v0.1.9.5**: LACR 1 direct/indirect association algorithm, do-operator with direction analysis, interventional queries via `causalif_intervene`.
+- **v0.1.9**: Removed LLM-based causal directions, introduced Bayesian-based causal direction with Hill Climb search and immediate upstream/downstream effects. Hybrid graph with associations and causal directions.
 - **v0.1.6**: Removed directed graph dependencies, added example notebook.
 - **v0.1.5**: README updates.
 - **v0.1.4**: Base version with complete Causalif algorithm.

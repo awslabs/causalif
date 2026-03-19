@@ -3,11 +3,14 @@
 
 """Visualization utilities for CausalIF"""
 
+import logging
 from typing import Dict, Union
 import math
 import pandas as pd
 import networkx as nx
 import plotly.graph_objects as go
+
+logger = logging.getLogger(__name__)
 
 
 def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Graph", target_factor: str = None) -> go.Figure:
@@ -23,18 +26,18 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         Plotly Figure object
     """
     if len(graph.nodes()) == 0:
-        print(f"No nodes to display in {title}")
+        logger.info(f"No nodes to display in {title}")
         return None
     
     # Remove isolated nodes (nodes with no edges)
     isolated_nodes = list(nx.isolates(graph))
     if isolated_nodes:
-        print(f"Removing {len(isolated_nodes)} isolated nodes from visualization: {isolated_nodes}")
+        logger.info(f"Removing {len(isolated_nodes)} isolated nodes from visualization: {isolated_nodes}")
         graph = graph.copy()  # Don't modify original
         graph.remove_nodes_from(isolated_nodes)
         
         if len(graph.nodes()) == 0:
-            print(f"No connected nodes to display in {title}")
+            logger.info(f"No connected nodes to display in {title}")
             return None
 
     # Get causal inference information if available
@@ -56,13 +59,13 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                 if adj_set:
                     all_confounders.update(adj_set)
             
-            print(f"\n[Causal Inference Visualization]")
-            print(f"  Target: {target_factor}")
-            print(f"  Direct causes: {direct_causes}")
-            print(f"  Direct effects: {direct_effects}")
-            print(f"  Confounders: {list(all_confounders)}")
+            logger.info(f"[Causal Inference Visualization]")
+            logger.info(f"  Target: {target_factor}")
+            logger.info(f"  Direct causes: {direct_causes}")
+            logger.info(f"  Direct effects: {direct_effects}")
+            logger.info(f"  Confounders: {list(all_confounders)}")
         except Exception as e:
-            print(f"  Warning: Could not get causal summary: {e}")
+            logger.warning(f"Could not get causal summary: {e}")
 
     pos = nx.spring_layout(graph, seed=42, k=3, iterations=50) if graph.edges() else {
         node: (i, 0) for i, node in enumerate(graph.nodes())
@@ -100,20 +103,26 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         
         # Get causal strength from edge data
         edge_data = graph[edge[0]][edge[1]]
-        strength = edge_data.get('strength', 0) or 0
+        is_undirected_edge = isinstance(graph, nx.DiGraph) and edge_data.get('undirected', False)
+        strength = edge_data.get('prior_strength', 0) or 0
         
         # Store edge label position (midpoint) and text
+        # No labels for undirected/dashed edges (LLM-only, no data)
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         edge_labels_x.append(mid_x)
         edge_labels_y.append(mid_y)
-        edge_labels_text.append(f"{strength:.2f}" if strength > 0 else "")
+        edge_labels_text.append(f"{strength:.2f}" if strength > 0 and not is_undirected_edge else "")
         
         edge_color = 'red'
         edge_width = 2
         
+        # Undirected/dashed edges: fixed size and color
+        if is_undirected_edge:
+            edge_color = 'red'
+            edge_width = 1.5
         # Color based on degrees from target (if target specified)
-        if target_factor:
+        elif target_factor:
             max_degree = max(degrees_map.get(edge[0], 0), degrees_map.get(edge[1], 0))
             if max_degree <= 1:
                 edge_color = 'red'
@@ -131,8 +140,8 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                 edge_color = 'lightgray'
                 edge_width = 1
         
-        # Modulate edge width by causal strength
-        if strength > 0:
+        # Modulate edge width by causal strength (only for directed edges)
+        if strength > 0 and not is_undirected_edge:
             edge_width = edge_width * (0.5 + strength)
 
         if isinstance(graph, nx.DiGraph):
@@ -361,15 +370,27 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
 def visualize_causalif_results(causalif_result: Dict) -> go.Figure:
     """Create visualization from CausalIF results with degree-based coloring"""
     from .engine import CausalIFEngine  # Import here to avoid circular dependency
-    
+
     if not causalif_result['success']:
-        print("Cannot visualize failed CausalIF analysis")
+        logger.warning("Cannot visualize failed CausalIF analysis")
         return None
 
     max_degrees = causalif_result.get('max_degrees_used', 5)
     max_parallel_queries = causalif_result.get('max_parallel_queries_used', 50)
-    viz_engine = CausalIFEngine(model=None, dataframe=pd.DataFrame({'ftg': [1, 2, 3], 'week': [30, 31, 32]}), 
-                               max_degrees=max_degrees, max_parallel_queries=max_parallel_queries)
+
+    # Build a minimal dataframe from the causal graph nodes so the engine
+    # has a valid (non-hardcoded) dataframe.  Only the column names and
+    # max_degrees / max_parallel_queries are used by the visualization path.
+    graph_nodes = causalif_result['causal_graph'].get('nodes', [])
+    if graph_nodes:
+        dummy_df = pd.DataFrame({col: [0] for col in graph_nodes})
+    else:
+        dummy_df = pd.DataFrame({'_placeholder': [0]})
+
+    viz_engine = CausalIFEngine(
+        model=None, dataframe=dummy_df,
+        max_degrees=max_degrees, max_parallel_queries=max_parallel_queries,
+    )
 
     causal_graph = nx.DiGraph()
     causal_graph.add_nodes_from(causalif_result['causal_graph']['nodes'])
