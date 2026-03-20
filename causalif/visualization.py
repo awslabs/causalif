@@ -67,7 +67,11 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         except Exception as e:
             logger.warning(f"Could not get causal summary: {e}")
 
-    pos = nx.spring_layout(graph, seed=42, k=3, iterations=50) if graph.edges() else {
+    n_nodes = len(graph.nodes())
+    # Scale layout spacing and iterations with node count so larger graphs spread out
+    layout_k = max(3, 2.0 * math.sqrt(n_nodes))
+    layout_iters = max(50, 20 * n_nodes)
+    pos = nx.spring_layout(graph, seed=42, k=layout_k, iterations=layout_iters) if graph.edges() else {
         node: (i, 0) for i, node in enumerate(graph.nodes())
     }
 
@@ -286,9 +290,9 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
     node_trace = go.Scatter(
         x=node_x, y=node_y, mode='markers+text',
         text=node_text, textposition="middle center",
-        textfont=dict(size=12, color='orange', family='Arial Black'),
+        textfont=dict(size=max(8, 14 - n_nodes // 10), color='orange', family='Arial Black'),
         marker=dict(
-            size=50, color=node_colors, 
+            size=max(30, 55 - n_nodes), color=node_colors, 
             colorscale='RdYlGn_r' if causal_summary else ('Purples' if target_factor else 'Blues'),
             line=dict(width=2, color='white'),
             showscale=False
@@ -350,6 +354,10 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
             yanchor='top'
         )
     
+    # Scale figure size with node count — more nodes need more room
+    fig_width = max(900, 500 + 50 * n_nodes)
+    fig_height = max(500, 300 + 30 * n_nodes)
+
     fig.update_layout(
         title=dict(
             text=f"{title} ({graph_type}){degree_info}{causal_info} - {len(graph.nodes())} nodes, {len(graph.edges())} edges - Bayesian", 
@@ -359,7 +367,7 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         margin=dict(b=20, l=5, r=200, t=60),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        width=900, height=400, 
+        width=fig_width, height=fig_height, 
         plot_bgcolor='black',
         paper_bgcolor='black'
     )

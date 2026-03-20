@@ -211,10 +211,14 @@ def map_classification_to_vote(final_classification: str, initial_association: s
 class PriorWeightedBDeu(StructureScore):
     """Custom scoring: BDeu + CausalIF 1 structure priors.
     
-    Score: log P(G|D) = BDeu(D|G) + λ × Σ log(prior_strength)
+    Score: log P(G|D) = Σ_v [ BDeu_local(v, pa(v)) + λ × Σ_{p ∈ pa(v)} log(prior_strength + 1) ]
     
-    λ scales as log(n) × ESS by default — priors fade slowly as data grows,
-    matching information-theoretic bounds (similar to BIC penalty).
+    λ = α_structure / (n_nodes − 1) by default, where α_structure = ESS.
+    This treats the LLM structure prior as equivalent to α_structure imaginary
+    data points (rows) of structural evidence, distributed across the maximum
+    possible parent edges per variable. As n_samples grows, data dominates
+    the posterior; as n_samples is small, the prior has proportionally more
+    influence — standard Bayesian updating (Heckerman et al. 1995).
     """
     
     def __init__(self, data, skeleton_graph, prior_weight='auto', equivalent_sample_size=10, quiet=False, **kwargs):
@@ -223,9 +227,14 @@ class PriorWeightedBDeu(StructureScore):
         self.bdeu = BDeu(data, equivalent_sample_size=equivalent_sample_size)
         self.skeleton = skeleton_graph
         
+        n_nodes = len(skeleton_graph.nodes()) if len(skeleton_graph.nodes()) > 0 else 1
+        
         if prior_weight == 'auto':
-            n_samples = len(data)
-            self.prior_weight = math.log(n_samples) * equivalent_sample_size
+            # α_structure = ESS: the LLM prior is worth ESS imaginary data points.
+            # Divide by max fan-in (n_nodes − 1) so the total prior budget per
+            # variable stays bounded regardless of graph size.
+            alpha_structure = equivalent_sample_size
+            self.prior_weight = alpha_structure / max(1, n_nodes - 1)
         else:
             self.prior_weight = prior_weight
         
@@ -237,18 +246,32 @@ class PriorWeightedBDeu(StructureScore):
         
         if not quiet:
             logger.info(f"\n[Prior-Weighted Scoring] Initialized with {len(self.prior_strengths)//2} prior edges")
-            logger.info(f"  Prior weight (λ): {self.prior_weight:.2f} {'(adaptive: log(n) × ESS)' if prior_weight == 'auto' else '(manual)'}")
-            logger.info(f"  Sample size: {len(data)}, ESS: {equivalent_sample_size}")
+            logger.info(f"  Prior weight (λ): {self.prior_weight:.4f} {'(adaptive: ESS / (n_nodes-1))' if prior_weight == 'auto' else '(manual)'}")
+            logger.info(f"  α_structure (ESS): {equivalent_sample_size}, n_nodes: {n_nodes}")
+            logger.info(f"  Sample size: {len(data)}")
+            logger.info(f"  Prior-to-data ratio: ~{equivalent_sample_size}/{len(data)} = {equivalent_sample_size/max(1,len(data)):.4f} per variable")
             if self.prior_strengths:
-                logger.info(f"  Prior strength range: [{min(self.prior_strengths.values()):.3f}, {max(self.prior_strengths.values()):.3f}]")
-                min_contrib = self.prior_weight * math.log(min(self.prior_strengths.values()) + 1e-10)
-                max_contrib = self.prior_weight * math.log(max(self.prior_strengths.values()) + 1e-10)
-                logger.info(f"  Effective prior contribution per edge: [{min_contrib:.2f}, {max_contrib:.2f}]")
-                logger.info(f"  Note: Structure priors fade slowly (log growth) as data accumulates")
+                s_min = min(self.prior_strengths.values())
+                s_max = max(self.prior_strengths.values())
+                logger.info(f"  Prior strength range: [{s_min:.3f}, {s_max:.3f}]")
+                min_contrib = self.prior_weight * math.log(s_min + 1)
+                max_contrib = self.prior_weight * math.log(s_max + 1)
+                logger.info(f"  Effective prior contribution per edge: [{min_contrib:.4f}, {max_contrib:.4f}]")
+                max_budget = (n_nodes - 1) * max_contrib
+                logger.info(f"  Max prior budget per variable (all parents): {max_budget:.4f}")
     
     def score(self, model):
-        """Overall model score. Delegates to BDeu — priors are in local_score()."""
-        return self.bdeu.score(model)
+        """Overall model score = Σ local_score(v, parents(v)) over all nodes.
+        
+        Sums local_score() so the prior contributions are included consistently
+        with Hill Climb's incremental scoring. Delegating to BDeu.score() would
+        bypass the prior, causing score() and local_score() to disagree.
+        """
+        score_val = 0.0
+        for node in model.nodes():
+            parents = list(model.predecessors(node))
+            score_val += self.local_score(node, parents)
+        return score_val
     
     def local_score(self, variable, parents):
         """Local score = BDeu local + prior contribution for parent edges."""
@@ -352,6 +375,7 @@ class CausalIFEngine:
         
         Uses quantile bins for skewed columns (|skew| > 2), kmeans otherwise.
         Fitted discretizers are cached for deterministic bins across CausalIF 2 & 3.
+        NaN values are preserved (not passed to sklearn) and filled downstream.
         """
         DISCRETE_THRESHOLD = 7
         MAX_BINS = 5
@@ -370,8 +394,12 @@ class CausalIFEngine:
                 elif col in self._cached_discretizers:
                     # Reuse previously fitted discretizer for deterministic bins
                     kbd = self._cached_discretizers[col]
-                    binned = kbd.transform(df[[col]])
-                    df[col] = binned[:, 0].astype(int).astype(str)
+                    mask = df[col].notna()
+                    df[col] = df[col].astype(object)  # avoid FutureWarning on mixed-dtype assignment
+                    if mask.any():
+                        binned = kbd.transform(df.loc[mask, [col]])
+                        df.loc[mask, col] = binned[:, 0].astype(int).astype(str)
+                    # NaN rows stay NaN — filled to 'missing' downstream
                     actual_bins = len(kbd.bin_edges_[0]) - 1
                     logger.info(f"    ✓ '{col}' discretized ({n_unique} unique → {actual_bins} {kbd.strategy} bins, cached)")
                 else:
@@ -382,20 +410,46 @@ class CausalIFEngine:
                     col_skew = df[col].dropna().skew()
                     strategy = 'quantile' if abs(col_skew) > SKEW_THRESHOLD else 'kmeans'
 
+                    # Separate NaN mask — sklearn cannot handle NaN
+                    mask = df[col].notna()
+                    if not mask.any():
+                        df[col] = df[col].astype(str)
+                        logger.info(f"    ⚠️  '{col}' all NaN — skipped")
+                        continue
+                    col_clean = df.loc[mask, [col]]
+                    df[col] = df[col].astype(object)  # avoid FutureWarning on mixed-dtype assignment
+
                     try:
                         kbd = KBinsDiscretizer(
                             n_bins=n_bins, encode='ordinal', strategy=strategy,
                             random_state=42,
                         )
-                        binned = kbd.fit_transform(df[[col]])
-                        df[col] = binned[:, 0].astype(int).astype(str)
+                        binned = kbd.fit_transform(col_clean)
+                        df.loc[mask, col] = binned[:, 0].astype(int).astype(str)
                         actual_bins = len(kbd.bin_edges_[0]) - 1
                         self._cached_discretizers[col] = kbd
                         skew_note = f", skew={col_skew:.1f}" if strategy == 'quantile' else ""
                         logger.info(f"    ✓ '{col}' discretized ({n_unique} unique → {actual_bins} {strategy} bins, Sturges' suggested {sturges_bins}{skew_note})")
                     except Exception:
-                        df[col] = df[col].astype(str)
-                        logger.info(f"    ⚠️  '{col}' fallback to string ({strategy} binning failed)")
+                        # Primary strategy failed — try uniform (equal-width)
+                        # which only needs min/max and almost never fails.
+                        if strategy != 'uniform':
+                            try:
+                                kbd = KBinsDiscretizer(
+                                    n_bins=n_bins, encode='ordinal', strategy='uniform',
+                                    random_state=42,
+                                )
+                                binned = kbd.fit_transform(col_clean)
+                                df.loc[mask, col] = binned[:, 0].astype(int).astype(str)
+                                actual_bins = len(kbd.bin_edges_[0]) - 1
+                                self._cached_discretizers[col] = kbd
+                                logger.info(f"    ✓ '{col}' discretized ({n_unique} unique → {actual_bins} uniform bins, fallback from {strategy})")
+                            except Exception:
+                                df[col] = df[col].astype(str)
+                                logger.info(f"    ⚠️  '{col}' fallback to string (all binning strategies failed)")
+                        else:
+                            df[col] = df[col].astype(str)
+                            logger.info(f"    ⚠️  '{col}' fallback to string (uniform binning failed)")
             else:
                 df[col] = df[col].astype(str)
 
@@ -1560,6 +1614,20 @@ class CausalIFEngine:
                             adaptive_max_iter = max(100, n_nodes * 20)
                             logger.info(f"  Max iterations: {adaptive_max_iter} (adaptive: max(100, {n_nodes} nodes × 20))")
                             
+                            # Adaptive max-indegree to prevent BDeu state-space overflow.
+                            # BDeu computes num_parents_states = prod(card(parent_i)).
+                            # If that product exceeds ~2^53 (float64 integer range),
+                            # pgmpy overflows in scalar multiply.  We find the
+                            # largest per-variable cardinality in the discretized
+                            # data and pick the highest indegree k such that
+                            # max_card^k stays safely below the overflow threshold.
+                            _SAFE_LIMIT = 2**53          # float64 exact-integer ceiling
+                            max_card = max(df_for_learning[c].nunique() for c in df_for_learning.columns)
+                            max_card = max(max_card, 2)  # guard against degenerate 1-state columns
+                            max_indegree = max(2, int(math.log(_SAFE_LIMIT) / math.log(max_card)))
+                            max_indegree = min(max_indegree, n_nodes - 1)
+                            logger.info(f"  Max indegree: {max_indegree} (adaptive: max_card={max_card}, safe limit=2^53)")
+                            
                             # True Bayesian approach: only forbid edges involving
                             # user-excluded columns.  All other edges are allowed so
                             # the data likelihood can discover relationships the LLM
@@ -1644,6 +1712,7 @@ class CausalIFEngine:
                                     best_model = hc.estimate(
                                         scoring_method=scoring_method, 
                                         max_iter=adaptive_max_iter,
+                                        max_indegree=max_indegree,
                                         start_dag=start_dag,
                                         tabu_length=len(valid_fixed_edges) * 2,
                                         expert_knowledge=expert_knowledge,
@@ -1654,6 +1723,7 @@ class CausalIFEngine:
                                     best_model = hc.estimate(
                                         scoring_method=scoring_method, 
                                         max_iter=adaptive_max_iter,
+                                        max_indegree=max_indegree,
                                         expert_knowledge=expert_knowledge,
                                         show_progress=False
                                     )
@@ -1661,6 +1731,7 @@ class CausalIFEngine:
                                 best_model = hc.estimate(
                                     scoring_method=scoring_method, 
                                     max_iter=adaptive_max_iter,
+                                    max_indegree=max_indegree,
                                     expert_knowledge=expert_knowledge,
                                     show_progress=False
                                 )
@@ -1716,20 +1787,21 @@ class CausalIFEngine:
                                 n_rows = len(df_for_learning)
                                 successful_iterations = 0
                                 
-                                for b in range(self.bootstrap_iterations):
+                                # Bootstrap iterations are independent — run in
+                                # parallel threads.  pgmpy/numpy release the GIL
+                                # for heavy numeric work so threads give real speedup.
+                                
+                                def _run_single_bootstrap(b):
+                                    """Run one bootstrap resample and return its edges."""
                                     np.random.seed(42 + b)
                                     random.seed(42 + b)
-                                    
-                                    # Resample with replacement
                                     boot_indices = np.random.choice(n_rows, size=n_rows, replace=True)
                                     boot_df = df_for_learning.iloc[boot_indices].reset_index(drop=True)
                                     
+                                    pgmpy_logger = logging.getLogger('pgmpy')
+                                    prev_level = pgmpy_logger.level
+                                    pgmpy_logger.setLevel(logging.WARNING)
                                     try:
-                                        # Suppress pgmpy's verbose datatype logging during bootstrap
-                                        pgmpy_logger = logging.getLogger('pgmpy')
-                                        prev_level = pgmpy_logger.level
-                                        pgmpy_logger.setLevel(logging.WARNING)
-                                        
                                         boot_scoring = PriorWeightedBDeu(
                                             data=boot_df,
                                             skeleton_graph=skeleton_for_orientation,
@@ -1739,7 +1811,6 @@ class CausalIFEngine:
                                         )
                                         boot_hc = HillClimbSearch(boot_df)
                                         
-                                        # Use same start_dag and tabu_length as main run
                                         if fixed_edges_undirected and valid_fixed_edges:
                                             boot_start_dag = DiscreteBayesianNetwork(valid_fixed_edges)
                                             for node in nodes_not_in_edges:
@@ -1747,6 +1818,7 @@ class CausalIFEngine:
                                             boot_model = boot_hc.estimate(
                                                 scoring_method=boot_scoring,
                                                 max_iter=adaptive_max_iter,
+                                                max_indegree=max_indegree,
                                                 start_dag=boot_start_dag,
                                                 tabu_length=len(valid_fixed_edges) * 2,
                                                 expert_knowledge=expert_knowledge,
@@ -1756,18 +1828,31 @@ class CausalIFEngine:
                                             boot_model = boot_hc.estimate(
                                                 scoring_method=boot_scoring,
                                                 max_iter=adaptive_max_iter,
+                                                max_indegree=max_indegree,
                                                 expert_knowledge=expert_knowledge,
                                                 show_progress=False
                                             )
-                                        
-                                        for edge in boot_model.edges():
-                                            edge_counts[edge] += 1
-                                            edge_pair_counts[frozenset(edge)] += 1
-                                        successful_iterations += 1
+                                        return list(boot_model.edges())
                                     except Exception as e:
                                         logger.debug(f"  Bootstrap iteration {b+1} failed: {str(e)[:80]}")
+                                        return None
                                     finally:
                                         pgmpy_logger.setLevel(prev_level)
+                                
+                                import os
+                                n_workers = min(self.bootstrap_iterations, max(1, os.cpu_count() or 4))
+                                logger.info(f"  Using {n_workers} parallel workers\n")
+                                
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
+                                    futures = {executor.submit(_run_single_bootstrap, b): b 
+                                              for b in range(self.bootstrap_iterations)}
+                                    for future in concurrent.futures.as_completed(futures):
+                                        result = future.result()
+                                        if result is not None:
+                                            for edge in result:
+                                                edge_counts[edge] += 1
+                                                edge_pair_counts[frozenset(edge)] += 1
+                                            successful_iterations += 1
                                 
                                 if successful_iterations == 0:
                                     logger.warning("All bootstrap iterations failed — skipping stability pruning")
