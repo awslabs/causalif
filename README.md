@@ -347,6 +347,7 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
+- **v0.1.9.7**: Improved numerical stability in discretization pipeline, refined prior contribution diagnostics, and adaptive graph visualization for larger causal structures.
 - **v0.1.9.6**: Bootstrap stability validation in CausalIF 2 (resample + re-run Hill Climb, prune edges below 70% directed stability).
 - **v0.1.9.5**: LACR 1 direct/indirect association algorithm, do-operator with direction analysis, interventional queries via `causalif_intervene`.
 - **v0.1.9**: Removed LLM-based causal directions, introduced Bayesian-based causal direction with Hill Climb search and immediate upstream/downstream effects. Hybrid graph with associations and causal directions.
