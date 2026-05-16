@@ -6,7 +6,7 @@ networkx>=2.6.0
 plotly>=5.0.0
 langchain-core>=0.1.0
 numpy>=1.21.0
-pgmpy>=0.1.23
+pgmpy>=1.1.0
 scikit-learn>=1.0.0
 hypothesis>=6.0.0
 

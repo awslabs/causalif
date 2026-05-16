@@ -68,9 +68,10 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
             logger.warning(f"Could not get causal summary: {e}")
 
     n_nodes = len(graph.nodes())
-    # Scale layout spacing and iterations with node count so larger graphs spread out
-    layout_k = max(3, 2.0 * math.sqrt(n_nodes))
-    layout_iters = max(50, 20 * n_nodes)
+    # Scale layout spacing and iterations with node count so larger graphs spread out.
+    # Use a larger k value to push nodes further apart and make edge labels readable.
+    layout_k = max(5, 3.5 * math.sqrt(n_nodes))
+    layout_iters = max(100, 30 * n_nodes)
     pos = nx.spring_layout(graph, seed=42, k=layout_k, iterations=layout_iters) if graph.edges() else {
         node: (i, 0) for i, node in enumerate(graph.nodes())
     }
@@ -109,14 +110,38 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         edge_data = graph[edge[0]][edge[1]]
         is_undirected_edge = isinstance(graph, nx.DiGraph) and edge_data.get('undirected', False)
         strength = edge_data.get('prior_strength', 0) or 0
+        do_probability = edge_data.get('do_probability', None)
+        do_direction = edge_data.get('do_direction', None)
         
-        # Store edge label position (midpoint) and text
+        # Store edge label position (midpoint, offset slightly for readability) and text
         # No labels for undirected/dashed edges (LLM-only, no data)
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
+        # Offset label perpendicular to edge direction for readability
+        dx = x1 - x0
+        dy = y1 - y0
+        length = math.sqrt(dx * dx + dy * dy)
+        if length > 0:
+            # Perpendicular offset (rotated 90 degrees)
+            offset_scale = 0.03
+            mid_x += (-dy / length) * offset_scale
+            mid_y += (dx / length) * offset_scale
         edge_labels_x.append(mid_x)
         edge_labels_y.append(mid_y)
-        edge_labels_text.append(f"{strength:.2f}" if strength > 0 and not is_undirected_edge else "")
+        # Prefer do-operator probability if available; fall back to prior_strength
+        if do_probability is not None and not is_undirected_edge:
+            direction_symbol = ""
+            if do_direction == "positive":
+                direction_symbol = "↑"
+            elif do_direction == "negative":
+                direction_symbol = "↓"
+            elif do_direction == "neutral":
+                direction_symbol = "→"
+            edge_labels_text.append(f"P={do_probability:.2f}{direction_symbol}")
+        elif strength > 0 and not is_undirected_edge:
+            edge_labels_text.append(f"{strength:.2f}")
+        else:
+            edge_labels_text.append("")
         
         edge_color = 'red'
         edge_width = 2
@@ -145,8 +170,10 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                 edge_width = 1
         
         # Modulate edge width by causal strength (only for directed edges)
-        if strength > 0 and not is_undirected_edge:
-            edge_width = edge_width * (0.5 + strength)
+        # Prefer do_probability (ATE) over prior_strength when available
+        effective_strength = do_probability if (do_probability is not None and do_probability > 0) else strength
+        if effective_strength > 0 and not is_undirected_edge:
+            edge_width = edge_width * (0.5 + effective_strength)
 
         if isinstance(graph, nx.DiGraph):
             # Check if this edge is marked as undirected
@@ -169,8 +196,17 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                     line_dash = 'dash'
                 else:
                     hover_text = f"{edge[0]} → {edge[1]}"
+                    if do_probability is not None and do_probability > 0:
+                        hover_text += f"<br>Do-Operator P (ATE): {do_probability:.4f}"
+                        if do_direction:
+                            direction_label = {
+                                'positive': 'Directly related (↑cause → ↑effect)',
+                                'negative': 'Inversely related (↑cause → ↓effect)',
+                                'neutral': 'Neutral (no significant shift)',
+                            }.get(do_direction, do_direction)
+                            hover_text += f"<br>Direction: {direction_label}"
                     if strength > 0:
-                        hover_text += f"<br>Causal Strength: {strength:.3f}"
+                        hover_text += f"<br>Prior Strength: {strength:.3f}"
                     line_dash = 'solid'
                     
                     # Add adjustment set information if available
@@ -224,8 +260,17 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         else:
             # Undirected graph
             hover_text = f"{edge[0]} - {edge[1]}"
+            if do_probability is not None and do_probability > 0:
+                hover_text += f"<br>Do-Operator P (ATE): {do_probability:.4f}"
+                if do_direction:
+                    direction_label = {
+                        'positive': 'Directly related (↑cause → ↑effect)',
+                        'negative': 'Inversely related (↑cause → ↓effect)',
+                        'neutral': 'Neutral (no significant shift)',
+                    }.get(do_direction, do_direction)
+                    hover_text += f"<br>Direction: {direction_label}"
             if strength > 0:
-                hover_text += f"<br>Causal Strength: {strength:.3f}"
+                hover_text += f"<br>Prior Strength: {strength:.3f}"
             if target_factor:
                 max_degree = max(degrees_map.get(edge[0], 0), degrees_map.get(edge[1], 0))
                 hover_text += f"<br>Max Degree from Target: {max_degree}"
@@ -307,13 +352,27 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
     
     # Add edge strength labels
     if edge_labels_x:
+        # Color edge labels based on do-operator direction
+        edge_label_colors = []
+        for text in edge_labels_text:
+            if '↑' in text:
+                edge_label_colors.append('lime')       # positive/direct
+            elif '↓' in text:
+                edge_label_colors.append('#ff6666')    # negative/inverse
+            elif '→' in text:
+                edge_label_colors.append('yellow')     # neutral
+            elif text:
+                edge_label_colors.append('cyan')       # prior_strength fallback
+            else:
+                edge_label_colors.append('cyan')
+        
         edge_labels_trace = go.Scatter(
             x=edge_labels_x, 
             y=edge_labels_y,
             mode='text',
             text=edge_labels_text,
             textposition="middle center",
-            textfont=dict(size=10, color='cyan', family='Arial Bold'),
+            textfont=dict(size=10, color=edge_label_colors, family='Arial Bold'),
             hoverinfo='skip',
             showlegend=False
         )
@@ -329,7 +388,11 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                      "<span style='color:lightgray'>━━━</span> 5+ degrees<br><br>" + \
                      "<b>Edge Type:</b><br>" + \
                      "<span style='color:white'>━━━→</span> Directed (Bayesian-inferred)<br>" + \
-                     "<span style='color:white'>┄┄┄</span> Undirected (Associated)"
+                     "<span style='color:white'>┄┄┄</span> Undirected (Associated)<br><br>" + \
+                     "<b>Edge Labels (Do-Operator):</b><br>" + \
+                     "P=value↑ Directly related<br>" + \
+                     "P=value↓ Inversely related<br>" + \
+                     "P=value→ Neutral"
         
         # Add causal inference legend if enabled
         if causal_summary:
@@ -355,8 +418,8 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         )
     
     # Scale figure size with node count — more nodes need more room
-    fig_width = max(900, 500 + 50 * n_nodes)
-    fig_height = max(500, 300 + 30 * n_nodes)
+    fig_width = max(1100, 600 + 70 * n_nodes)
+    fig_height = max(700, 400 + 45 * n_nodes)
 
     fig.update_layout(
         title=dict(
