@@ -93,13 +93,23 @@ CausalIF implements a 3-stage algorithm:
 
 ### Stage 3: Causal Inference (Optional)
 
-**Goal**: Quantify causal effects and enable interventional queries
+**Goal**: Quantify causal effects, enable interventional queries, and annotate edges with probabilities
 
-**Process**: Fit CPDs → Compute Average Treatment Effects → Direction analysis → Enable do-operator queries
+**Process**: Fit CPDs → Compute Average Treatment Effects (ATE) for all edges → Direction analysis → Prune negligible edges → Enable do-operator queries
 
 **Enable with**: `enable_causal_estimate=True`
 
-The do-operator computes `P(target | do(cause=value))` using pgmpy's backdoor adjustment. Direction analysis compares the intervention direction (cause pushed above/below its baseline) with the effect shift to determine if variables are directly or inversely related. The do-operator only works in the causal direction (ancestor → descendant); querying the reverse returns a helpful error with a suggestion.
+**Edge Probability Labels**: After fitting the causal model, the do-operator computes `P(effect | do(cause=value))` for every directed edge. Each edge is annotated with:
+- **P=value**: The ATE (max probability shift) — how much the effect's distribution changes when you intervene on the cause
+- **↑**: Directly related (increasing cause increases effect)
+- **↓**: Inversely related (increasing cause decreases effect)
+- **→**: Neutral (no significant directional shift)
+
+**Edge Pruning**: Edges with ATE < 0.01 are removed — if the do-operator shows no measurable interventional effect, the edge is considered noise from structure learning.
+
+**Direction Fallback**: For categorical effects where numeric direction can't be computed, the system compares most-likely states under low vs high intervention to determine if the distribution shifts.
+
+The do-operator uses pgmpy's backdoor adjustment. It only works in the causal direction (ancestor → descendant); querying the reverse returns a helpful error with a suggestion.
 
 ---
 
@@ -347,6 +357,7 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
+- **v0.1.9.8**: Do-operator (ATE) probabilities and direction labels on all graph edges, pgmpy 1.1+ API migration, adaptive edge pruning (ATE < 0.01 removed), improved node spacing in visualization.
 - **v0.1.9.7**: Improved numerical stability in discretization pipeline, refined prior contribution diagnostics, and adaptive graph visualization for larger causal structures.
 - **v0.1.9.6**: Bootstrap stability validation in CausalIF 2 (resample + re-run Hill Climb, prune edges below 70% directed stability).
 - **v0.1.9.5**: LACR 1 direct/indirect association algorithm, do-operator with direction analysis, interventional queries via `causalif_intervene`.

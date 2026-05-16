@@ -1,12 +1,22 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+                                                            # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
 CausalIF: Language-Augmented Causal Reasoning with Bayesian Inference
 """
 
-__version__ = "0.1.9.7"
+import logging
+
+__version__ = "0.1.9.8"
 __author__ = "Subhro Bose"
 __email__ = "bossubhr@amazon.co.uk"
+
+# Auto-configure logging so output is visible in notebooks and scripts.
+# Only adds a handler if the root logger (or causalif logger) has none,
+# to avoid duplicate output if the user already configured logging.
+_logger = logging.getLogger("causalif")
+if not _logger.handlers and not logging.root.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+_logger.setLevel(logging.INFO)
 
 from .core import (
     KnowledgeBase

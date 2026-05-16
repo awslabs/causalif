@@ -20,7 +20,9 @@ import networkx as nx
 import numpy as np
 from sklearn.preprocessing import KBinsDiscretizer
 
-from pgmpy.estimators import HillClimbSearch, BDeu, ExpertKnowledge, StructureScore, MaximumLikelihoodEstimator
+from pgmpy.parameter_estimator import DiscreteMLE
+from pgmpy.causal_discovery import HillClimbSearch, ExpertKnowledge
+from pgmpy.structure_score import BaseStructureScore, BDeu
 from pgmpy.inference import CausalInference
 from pgmpy.models import DiscreteBayesianNetwork
 
@@ -28,6 +30,28 @@ from .core import KnowledgeBase
 from .prompts import CausalIFPrompts
 
 logger = logging.getLogger(__name__)
+
+
+def _run_hill_climb(data, scoring_method, max_iter, max_indegree,
+                    start_dag=None, tabu_length=100, expert_knowledge=None,
+                    show_progress=False):
+    """Run HillClimbSearch using the pgmpy >= 1.1 API.
+
+    Uses HillClimbSearch(...).fit(data) which returns self with causal_graph_ attribute.
+    """
+    hc = HillClimbSearch(
+        scoring_method=scoring_method,
+        start_dag=start_dag,
+        tabu_length=tabu_length,
+        max_indegree=max_indegree,
+        expert_knowledge=expert_knowledge,
+        return_type='dag',
+        epsilon=1e-4,
+        max_iter=max_iter,
+        show_progress=show_progress,
+    )
+    hc.fit(data)
+    return hc.causal_graph_
 
 def parse_association_type_response(response_text: str) -> Dict:
     """Parse LLM response from Association Type Verifier (Step 3 of LACR 1).
@@ -208,7 +232,7 @@ def map_classification_to_vote(final_classification: str, initial_association: s
 
 
 
-class PriorWeightedBDeu(StructureScore):
+class PriorWeightedBDeu(BaseStructureScore):
     """Custom scoring: BDeu + CausalIF 1 structure priors.
     
     Score: log P(G|D) = Σ_v [ BDeu_local(v, pa(v)) + λ × Σ_{p ∈ pa(v)} log(prior_strength + 1) ]
@@ -383,7 +407,7 @@ class CausalIFEngine:
         SKEW_THRESHOLD = 2.0
 
         context = f" for {label}" if label else ""
-        logger.info(f"\n  Discretizing numeric columns{context} (KBinsDiscretizer, Sturges' adaptive bins):")
+        logger.info(f"\n  Discretizing numeric columns{context} (KBinsDiscretizer, Sturges' adaptive bins, max {MAX_BINS}):")
 
         for col in df.columns:
             if pd.api.types.is_numeric_dtype(df[col]):
@@ -1594,8 +1618,6 @@ class CausalIFEngine:
                                 prior_weight='auto',
                                 equivalent_sample_size=10
                             )
-                            hc = HillClimbSearch(df_for_learning)
-                            
                             allowed_edges = []
                             fixed_edges_undirected = []
                             
@@ -1709,7 +1731,8 @@ class CausalIFEngine:
                                     
                                     logger.info(f"\n  Starting Hill Climb with {len(valid_fixed_edges)} fixed edges + {len(nodes_not_in_edges)} isolated nodes")
                                     
-                                    best_model = hc.estimate(
+                                    best_model = _run_hill_climb(
+                                        data=df_for_learning,
                                         scoring_method=scoring_method, 
                                         max_iter=adaptive_max_iter,
                                         max_indegree=max_indegree,
@@ -1720,7 +1743,8 @@ class CausalIFEngine:
                                     )
                                 else:
                                     logger.info(f"\n  No valid fixed edges (all involve factors not in df_for_learning)")
-                                    best_model = hc.estimate(
+                                    best_model = _run_hill_climb(
+                                        data=df_for_learning,
                                         scoring_method=scoring_method, 
                                         max_iter=adaptive_max_iter,
                                         max_indegree=max_indegree,
@@ -1728,7 +1752,8 @@ class CausalIFEngine:
                                         show_progress=False
                                     )
                             else:
-                                best_model = hc.estimate(
+                                best_model = _run_hill_climb(
+                                    data=df_for_learning,
                                     scoring_method=scoring_method, 
                                     max_iter=adaptive_max_iter,
                                     max_indegree=max_indegree,
@@ -1801,6 +1826,14 @@ class CausalIFEngine:
                                     pgmpy_logger = logging.getLogger('pgmpy')
                                     prev_level = pgmpy_logger.level
                                     pgmpy_logger.setLevel(logging.WARNING)
+                                    # Suppress pgmpy's tqdm progress bars during bootstrap
+                                    try:
+                                        from pgmpy import config as _pgmpy_config
+                                        _prev_show_progress = _pgmpy_config.SHOW_PROGRESS
+                                        _pgmpy_config.SHOW_PROGRESS = False
+                                    except (ImportError, AttributeError):
+                                        _pgmpy_config = None
+                                        _prev_show_progress = None
                                     try:
                                         boot_scoring = PriorWeightedBDeu(
                                             data=boot_df,
@@ -1809,13 +1842,13 @@ class CausalIFEngine:
                                             equivalent_sample_size=10,
                                             quiet=True
                                         )
-                                        boot_hc = HillClimbSearch(boot_df)
                                         
                                         if fixed_edges_undirected and valid_fixed_edges:
                                             boot_start_dag = DiscreteBayesianNetwork(valid_fixed_edges)
                                             for node in nodes_not_in_edges:
                                                 boot_start_dag.add_node(node)
-                                            boot_model = boot_hc.estimate(
+                                            boot_model = _run_hill_climb(
+                                                data=boot_df,
                                                 scoring_method=boot_scoring,
                                                 max_iter=adaptive_max_iter,
                                                 max_indegree=max_indegree,
@@ -1825,7 +1858,8 @@ class CausalIFEngine:
                                                 show_progress=False
                                             )
                                         else:
-                                            boot_model = boot_hc.estimate(
+                                            boot_model = _run_hill_climb(
+                                                data=boot_df,
                                                 scoring_method=boot_scoring,
                                                 max_iter=adaptive_max_iter,
                                                 max_indegree=max_indegree,
@@ -1838,6 +1872,8 @@ class CausalIFEngine:
                                         return None
                                     finally:
                                         pgmpy_logger.setLevel(prev_level)
+                                        if _pgmpy_config is not None:
+                                            _pgmpy_config.SHOW_PROGRESS = _prev_show_progress
                                 
                                 import os
                                 n_workers = min(self.bootstrap_iterations, max(1, os.cpu_count() or 4))
@@ -2123,7 +2159,7 @@ class CausalIFEngine:
             logger.info(f"  Using {len(df_for_fitting)} data samples")
             
             # Fit CPDs using MLE
-            bn.fit(df_for_fitting, estimator=MaximumLikelihoodEstimator)
+            bn.fit(df_for_fitting, estimator=DiscreteMLE())
             
             logger.info(f"  ✓ Successfully fitted {len(bn.get_cpds())} CPDs")
             
@@ -2617,6 +2653,86 @@ class CausalIFEngine:
             summary['causal_effects'] = self.estimate_causal_effects(target_factor, causal_graph)
             summary['downstream_effects'] = self.estimate_downstream_effects(target_factor, causal_graph)
             
+            # Store do-operator probabilities and direction on ALL directed edges
+            # so visualization can display them at every degree, not just 1st degree.
+            logger.info(f"\n  Computing do-operator ATE for all {len(list(causal_graph.edges()))} edges...")
+            edges_computed = 0
+            edges_failed = 0
+            for cause, effect in list(causal_graph.edges()):
+                if causal_graph[cause][effect].get('undirected', False):
+                    continue  # Skip undirected/dashed edges
+                try:
+                    ate_result = self.compute_ate(cause, effect)
+                    if ate_result and ate_result.get('ate_max', 0.0) > 0:
+                        causal_graph[cause][effect]['do_probability'] = ate_result['ate_max']
+                        interventions = ate_result.get('interventions', {})
+                        valid = {k: v for k, v in interventions.items() if v is not None}
+                        sorted_states = sorted(valid.keys(), key=lambda s: int(s) if s.isdigit() else s)
+                        if len(sorted_states) >= 2:
+                            low_dist = valid[sorted_states[0]]
+                            high_dist = valid[sorted_states[-1]]
+                            low_mean = self._weighted_mean_from_dist_static(low_dist, effect)
+                            high_mean = self._weighted_mean_from_dist_static(high_dist, effect)
+                            if not (np.isnan(low_mean) or np.isnan(high_mean)):
+                                shift = high_mean - low_mean
+                                if abs(shift) < 1e-6:
+                                    causal_graph[cause][effect]['do_direction'] = 'neutral'
+                                elif shift > 0:
+                                    causal_graph[cause][effect]['do_direction'] = 'positive'
+                                else:
+                                    causal_graph[cause][effect]['do_direction'] = 'negative'
+                            else:
+                                # Fallback for categorical effects: compare most-likely states
+                                # If the most probable outcome shifts, the relationship is non-neutral
+                                low_most_likely = max(low_dist, key=low_dist.get)
+                                high_most_likely = max(high_dist, key=high_dist.get)
+                                if low_most_likely == high_most_likely:
+                                    causal_graph[cause][effect]['do_direction'] = 'neutral'
+                                else:
+                                    # Try numeric comparison of state labels
+                                    try:
+                                        if float(high_most_likely) > float(low_most_likely):
+                                            causal_graph[cause][effect]['do_direction'] = 'positive'
+                                        else:
+                                            causal_graph[cause][effect]['do_direction'] = 'negative'
+                                    except (ValueError, TypeError):
+                                        # Truly categorical — just mark as "shifts" (positive by convention)
+                                        causal_graph[cause][effect]['do_direction'] = 'positive'
+                        edges_computed += 1
+                    else:
+                        # ATE is zero — no measurable effect
+                        causal_graph[cause][effect]['do_probability'] = 0.0
+                        causal_graph[cause][effect]['do_direction'] = 'neutral'
+                        edges_computed += 1
+                except Exception as e:
+                    edges_failed += 1
+                    logger.warning(f"  ⚠ ATE failed for {cause} → {effect}: {str(e)[:100]}")
+            
+            logger.info(f"  ✓ Do-operator annotation: {edges_computed} edges computed, {edges_failed} failed")
+
+            # Prune edges with negligible causal effect (ATE below threshold).
+            # If the do-operator shows no measurable interventional effect,
+            # the edge is likely noise from structure learning.
+            # Also prune edges where ATE computation failed entirely.
+            ate_threshold = 0.01
+            edges_to_remove = []
+            for cause, effect in list(causal_graph.edges()):
+                if causal_graph[cause][effect].get('undirected', False):
+                    continue
+                do_prob = causal_graph[cause][effect].get('do_probability', None)
+                # Remove if: ATE is below threshold OR ATE couldn't be computed
+                if do_prob is None or do_prob < ate_threshold:
+                    edges_to_remove.append((cause, effect))
+
+            if edges_to_remove:
+                causal_graph.remove_edges_from(edges_to_remove)
+                logger.info(f"  ✂ Pruned {len(edges_to_remove)} edges with ATE < {ate_threshold} (no measurable causal effect)")
+                # Remove isolated nodes left after pruning
+                isolated = list(nx.isolates(causal_graph))
+                if isolated:
+                    causal_graph.remove_nodes_from(isolated)
+                    logger.info(f"  ✂ Removed {len(isolated)} isolated nodes after pruning")
+
             # Get adjustment sets
             for cause in summary['direct_causes']:
                 try:
@@ -2626,6 +2742,25 @@ class CausalIFEngine:
                     summary['adjustment_sets'][cause] = None
         
         return summary
+
+    def _weighted_mean_from_dist_static(self, distribution: dict, var_name: str) -> float:
+        """Compute E[var] from a discrete distribution using bin midpoints (for edge annotation)."""
+        kbd = self._cached_discretizers.get(var_name)
+        if kbd is None:
+            try:
+                return sum(float(s) * p for s, p in distribution.items())
+            except (ValueError, TypeError):
+                return float('nan')
+        edges = kbd.bin_edges_[0]
+        total = 0.0
+        for s, p in distribution.items():
+            try:
+                idx = int(s)
+                if 0 <= idx < len(edges) - 1:
+                    total += ((edges[idx] + edges[idx + 1]) / 2.0) * p
+            except (ValueError, IndexError):
+                continue
+        return total
 
     def get_causal_summary_lightweight(self, target_factor: str, causal_graph: nx.DiGraph) -> Dict:
         """Lightweight causal summary: direct causes/effects and adjustment sets only.
