@@ -6,7 +6,7 @@ CausalIF: Language-Augmented Causal Reasoning with Bayesian Inference
 
 import logging
 
-__version__ = "0.1.9.8"
+__version__ = "0.1.9.9"
 __author__ = "Subhro Bose"
 __email__ = "bossubhr@amazon.co.uk"
 
