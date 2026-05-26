@@ -30,7 +30,8 @@ def set_causalif_engine(model, retriever_tool=None, retriever=None, dataframe=No
                     excluded_target_columns: List[str] = None, excluded_related_columns: List[str] = None,
                     related_factors: List[str] = None, selected_dataframe_columns: List[str] = None,
                     enable_causal_estimate: bool = None, domains: List[str] = None,
-                    bootstrap_iterations: int = None, bootstrap_threshold: float = None):
+                    bootstrap_iterations: int = None, bootstrap_threshold: float = None,
+                    factor_descriptions: str = None):
     """
     Set the global CausalIF engine instance with Bayesian causal inference.
     
@@ -114,9 +115,31 @@ def set_causalif_engine(model, retriever_tool=None, retriever=None, dataframe=No
         engine_kwargs['bootstrap_iterations'] = bootstrap_iterations
     if bootstrap_threshold is not None:
         engine_kwargs['bootstrap_threshold'] = bootstrap_threshold
+    if factor_descriptions is not None:
+        # If it's an S3 URI, fetch the content
+        if factor_descriptions.startswith('s3://'):
+            import boto3
+            parts = factor_descriptions[5:].split('/', 1)
+            bucket, key = parts[0], parts[1]
+            s3 = boto3.client('s3')
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            factor_descriptions = obj['Body'].read().decode('utf-8')
+            logger.info(f"✓ Loaded factor descriptions from s3://{bucket}/{key}")
+        engine_kwargs['factor_descriptions'] = factor_descriptions
     
     with _engine_lock:
         _global_causalif_engine = CausalIFEngine(**engine_kwargs)
+
+    # Warn loudly if factor_descriptions not provided
+    if factor_descriptions is None:
+        logger.warning("")
+        logger.warning("⚠️" * 20)
+        logger.warning("⚠️  WARNING: factor_descriptions NOT PROVIDED")
+        logger.warning("⚠️  Causal directions may be MISREPRESENTED because the LLM")
+        logger.warning("⚠️  cannot understand abbreviated column names without definitions.")
+        logger.warning("⚠️  Pass factor_descriptions='- col_name: description\\n...' to fix this.")
+        logger.warning("⚠️" * 20)
+        logger.warning("")
 
     logger.info("CausalIF engine configured with Bayesian causal inference")
     logger.info(f"max_token_limit={max_token_limit if max_token_limit is not None else '150000 (default)'}, "

@@ -319,7 +319,7 @@ class CausalIFEngine:
                  related_factors: List[str] = None, selected_dataframe_columns: List[str] = None,
                  enable_causal_estimate: bool = False, domains: List[str] = None,
                  batch_size: int = 10, read_timeout: int = 120, bootstrap_iterations: int = 50,
-                 bootstrap_threshold: float = 0.7):
+                 bootstrap_threshold: float = 0.7, factor_descriptions: str = None):
         self.model = model
         self.retriever_tool = retriever_tool
         self.retriever = retriever
@@ -331,6 +331,7 @@ class CausalIFEngine:
         self.excluded_related_columns = excluded_related_columns or []
         self.related_factors = related_factors or []
         self.selected_dataframe_columns = selected_dataframe_columns
+        self.factor_descriptions = factor_descriptions
         self.prompts = CausalIFPrompts()
         self.enable_causal_estimate = enable_causal_estimate
         self.causal_model = None
@@ -2037,11 +2038,128 @@ class CausalIFEngine:
             logger.info(f"  After filtering: {len(directed_graph.nodes())} nodes, {len(directed_graph.edges())} edges")
         
         logger.info("\n" + "=" * 80)
+        logger.info(f"STEP 2b: LLM Causal Direction Verification")
+        logger.info("=" * 80)
+        logger.info("Checking if data-driven edge directions agree with domain knowledge...")
+
+        if self.model is not None:
+            directed_graph = self._verify_edge_directions_with_llm(directed_graph, factors, domains)
+        else:
+            logger.info("  ⚠ No LLM model available — skipping direction verification")
+
+        logger.info("\n" + "=" * 80)
         logger.info(f"BAYESIAN INFERENCE COMPLETE")
         logger.info(f"POSTERIOR: {len(directed_graph.edges())} directed causal edges")
         logger.info("=" * 80)
         return directed_graph
 
+
+    def _verify_edge_directions_with_llm(self, directed_graph: nx.DiGraph, factors: List[str], domains: List[str]) -> nx.DiGraph:
+        """Verify and correct edge directions using LLM semantic understanding.
+        
+        For each directed edge A → B, asks the LLM whether A causes B or B causes A.
+        If the LLM disagrees with the data-driven direction, flips the edge.
+        This ensures the final graph respects domain semantics (e.g., weather causes
+        delays, not the reverse).
+        
+        Only checks directed edges (skips undirected/dashed ones).
+        Runs queries in parallel for speed.
+        """
+        directed_edges = [(u, v) for u, v in directed_graph.edges()
+                          if not directed_graph[u][v].get('undirected', False)]
+        
+        if not directed_edges:
+            logger.info("  No directed edges to verify")
+            return directed_graph
+        
+        logger.info(f"  Verifying {len(directed_edges)} edge directions with LLM...")
+        
+        # Build prompts for all edges
+        domain_str = ', '.join(domains)
+        factor_context = ""
+        if self.factor_descriptions:
+            factor_context = f"\nFactor Definitions:\n{self.factor_descriptions}\n\n"
+        
+        prompts = []
+        for cause, effect in directed_edges:
+            prompt = (
+                f"In the context of {domain_str}, consider these two factors: '{cause}' and '{effect}'.\n"
+                f"{factor_context}"
+                f"Question: Which is the correct causal direction?\n"
+                f"(A) '{cause}' causes/influences '{effect}'\n"
+                f"(B) '{effect}' causes/influences '{cause}'\n\n"
+                f"Consider which factor is more likely to be the root cause or driver. "
+                f"For example, external/environmental factors (weather, time, policy) typically cause "
+                f"operational outcomes, not the reverse.\n\n"
+                f"Answer with ONLY (A) or (B) followed by a one-sentence explanation."
+            )
+            prompts.append(prompt)
+        
+        # Execute in parallel
+        responses = self.execute_parallel_queries(prompts)
+        
+        # Parse responses and flip edges where LLM disagrees
+        edges_flipped = 0
+        for i, (cause, effect) in enumerate(directed_edges):
+            if i >= len(responses) or not responses[i]:
+                continue
+            
+            response = responses[i].strip().upper()
+            
+            # Check if LLM says direction should be reversed (B)
+            should_flip = False
+            if response.startswith("(B)") or response.startswith("B)") or response.startswith("B."):
+                should_flip = True
+            elif "(B)" in response[:20]:
+                should_flip = True
+            
+            if should_flip:
+                # Flip the edge: remove A→B, add B→A with same attributes
+                edge_attrs = dict(directed_graph[cause][effect])
+                directed_graph.remove_edge(cause, effect)
+                
+                # Check flipping won't create a cycle (full DAG check)
+                directed_graph.add_edge(effect, cause, **edge_attrs)
+                if nx.is_directed_acyclic_graph(directed_graph):
+                    edges_flipped += 1
+                    logger.info(f"    ✓ Flipped: {cause} → {effect}  ⟹  {effect} → {cause}")
+                else:
+                    # Flipping created a cycle — revert
+                    directed_graph.remove_edge(effect, cause)
+                    directed_graph.add_edge(cause, effect, **edge_attrs)
+                    logger.info(f"    ⚠ Cannot flip {cause} → {effect} (would create cycle)")
+        
+        logger.info(f"  Direction verification complete: {edges_flipped}/{len(directed_edges)} edges flipped")
+        
+        # Second pass: retry edges that couldn't be flipped earlier.
+        # After other flips, the graph topology changed — previously blocked
+        # edges may now be flippable.
+        blocked_edges = [(directed_edges[i], responses[i]) for i in range(len(directed_edges))
+                         if i < len(responses) and responses[i]
+                         and directed_graph.has_edge(directed_edges[i][0], directed_edges[i][1])
+                         and any(x in responses[i].strip().upper()[:20] for x in ["(B)", "B)", "B."])]
+        
+        if blocked_edges:
+            retry_flipped = 0
+            logger.info(f"\n  Retry pass: {len(blocked_edges)} edges were blocked, retrying after graph changes...")
+            for (cause, effect), _ in blocked_edges:
+                if not directed_graph.has_edge(cause, effect):
+                    continue  # Edge was already handled
+                edge_attrs = dict(directed_graph[cause][effect])
+                directed_graph.remove_edge(cause, effect)
+                directed_graph.add_edge(effect, cause, **edge_attrs)
+                if nx.is_directed_acyclic_graph(directed_graph):
+                    retry_flipped += 1
+                    edges_flipped += 1
+                    logger.info(f"    ✓ Retry flipped: {cause} → {effect}  ⟹  {effect} → {cause}")
+                else:
+                    directed_graph.remove_edge(effect, cause)
+                    directed_graph.add_edge(cause, effect, **edge_attrs)
+                    logger.info(f"    ⚠ Still cannot flip {cause} → {effect} (cycle persists)")
+            logger.info(f"  Retry pass complete: {retry_flipped} additional edges flipped")
+        
+        logger.info(f"  Total edges flipped: {edges_flipped}/{len(directed_edges)}")
+        return directed_graph
 
     def run_complete_causalif(self, factors: List[str], domains: List[str], target_factor: str = None) -> Tuple[nx.Graph, nx.DiGraph]:
         """Run complete CausalIF: Prior (skeleton) → Posterior (directed causal graph)."""
@@ -2512,7 +2630,7 @@ class CausalIFEngine:
         # Determine direction from lowest to highest cause state
         direction = "unknown"
         mean_shift_low_to_high = float('nan')
-        sorted_cause_states = sorted(cause_means.keys(), key=lambda s: int(s) if s.isdigit() else s)
+        sorted_cause_states = sorted([s for s in cause_means.keys() if s.isdigit()], key=int)
         if len(sorted_cause_states) >= 2:
             low_mean = cause_means[sorted_cause_states[0]]
             high_mean = cause_means[sorted_cause_states[-1]]
@@ -2667,10 +2785,11 @@ class CausalIFEngine:
                         causal_graph[cause][effect]['do_probability'] = ate_result['ate_max']
                         interventions = ate_result.get('interventions', {})
                         valid = {k: v for k, v in interventions.items() if v is not None}
-                        sorted_states = sorted(valid.keys(), key=lambda s: int(s) if s.isdigit() else s)
-                        if len(sorted_states) >= 2:
-                            low_dist = valid[sorted_states[0]]
-                            high_dist = valid[sorted_states[-1]]
+                        # Filter to numeric states only for direction comparison
+                        numeric_states = sorted([s for s in valid.keys() if s.isdigit()], key=int)
+                        if len(numeric_states) >= 2:
+                            low_dist = valid[numeric_states[0]]
+                            high_dist = valid[numeric_states[-1]]
                             low_mean = self._weighted_mean_from_dist_static(low_dist, effect)
                             high_mean = self._weighted_mean_from_dist_static(high_dist, effect)
                             if not (np.isnan(low_mean) or np.isnan(high_mean)):
@@ -2714,14 +2833,18 @@ class CausalIFEngine:
             # If the do-operator shows no measurable interventional effect,
             # the edge is likely noise from structure learning.
             # Also prune edges where ATE computation failed entirely.
-            ate_threshold = 0.01
+            ate_threshold = 0
             edges_to_remove = []
             for cause, effect in list(causal_graph.edges()):
                 if causal_graph[cause][effect].get('undirected', False):
                     continue
                 do_prob = causal_graph[cause][effect].get('do_probability', None)
-                # Remove if: ATE is below threshold OR ATE couldn't be computed
-                if do_prob is None or do_prob < ate_threshold:
+                # Remove if ATE is zero/negative (no causal effect)
+                if do_prob is not None and do_prob <= 0:
+                    edges_to_remove.append((cause, effect))
+                # Mark as dashed if ATE computation failed (keep edge but flag it)
+                elif do_prob is None:
+                    causal_graph[cause][effect]['undirected'] = True
                     edges_to_remove.append((cause, effect))
 
             if edges_to_remove:
