@@ -111,6 +111,31 @@ CausalIF implements a 3-stage algorithm:
 
 The do-operator uses pgmpy's backdoor adjustment. It only works in the causal direction (ancestor → descendant); querying the reverse returns a helpful error with a suggestion.
 
+### Factor Descriptions (Recommended)
+
+After Bayesian orientation, the LLM verifies edge directions using domain semantics (Step 2b). For this to work accurately, the LLM needs to understand what each column name means. Pass a `factor_descriptions` string with column definitions:
+
+```markdown
+# Factor Definitions
+- product_cogs_amt: cost of goods sold for the product in USD
+- asin_weight_kg: physical weight of the product in kilograms
+- gms: gross merchandise sales value
+- asp: average selling price per unit
+- ship_method: shipping method used (ground, air, express)
+- weather_condition: weather at time of shipment (clear, rain, snow)
+```
+
+Store this file in S3 and pass the URI directly:
+
+```python
+set_causalif_engine(
+    ...
+    factor_descriptions="s3://my-data-bucket/causalif/factor_descriptions.md",
+)
+```
+
+You can also pass the content inline as a string. If `factor_descriptions` is not provided, a warning is emitted that causal directions may be misrepresented due to ambiguous column names.
+
 ---
 
 ## Why Hill Climb and BDeu Score?
@@ -186,6 +211,10 @@ model=ChatBedrockConverse(model_id="<model_id>",temperature=0.0,region_name="<re
 # 3. Configure Causalif engine
 # Configure with financial data
 
+# Load factor descriptions from S3 (recommended for accurate causal direction detection)
+# Just pass the S3 URI directly — causalif fetches it automatically
+factor_descriptions = "s3://my-bucket/causalif/factor_descriptions.md"
+
 set_causalif_engine(
             model=<your_bedrock_model>,
             retriever_tool=retriever_tool,
@@ -200,6 +229,7 @@ set_causalif_engine(
             domains = <list of industry domains>, # Consider this mandatory for the model to apply adequate background knowledge
             bootstrap_iterations=50, # Number of bootstrap resamples for edge stability validation (0 to disable)
             bootstrap_threshold=0.7, # Prune edges with directed stability below this threshold
+            factor_descriptions=factor_descriptions, # Column definitions for LLM direction verification (see below)
         )
 
 # 4. Run causal analysis
@@ -357,7 +387,8 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
-- **v0.1.9.8**: Do-operator (ATE) probabilities and direction labels on all graph edges, pgmpy 1.1+ API migration, adaptive edge pruning (ATE < 0.01 removed), improved node spacing in visualization.
+- **v0.1.9.9**: Dropdown filter for verified/unverified edges (hides arrows and labels when filtering), dashed edge labels for ATE=0 or failed edges, improved arrow positioning (closer to target nodes), spring layout restored for reliable arrow rendering on all edges.
+- **v0.1.9.8**: Do-operator (ATE) probabilities and direction labels on all graph edges, pgmpy 1.1+ API migration, adaptive edge pruning (ATE < 0.01 removed), LLM-based causal direction verification (Step 2b), factor_descriptions parameter for column definitions, improved node spacing in visualization.
 - **v0.1.9.7**: Improved numerical stability in discretization pipeline, refined prior contribution diagnostics, and adaptive graph visualization for larger causal structures.
 - **v0.1.9.6**: Bootstrap stability validation in CausalIF 2 (resample + re-run Hill Climb, prune edges below 70% directed stability).
 - **v0.1.9.5**: LACR 1 direct/indirect association algorithm, do-operator with direction analysis, interventional queries via `causalif_intervene`.

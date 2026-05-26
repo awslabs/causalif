@@ -88,10 +88,20 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
     # Track undirected edges we've already drawn (to avoid drawing both directions)
     drawn_undirected_edges = set()
     
-    # Collect edge label positions and texts for strength values
-    edge_labels_x = []
-    edge_labels_y = []
-    edge_labels_text = []
+    # Track trace indices for dashed vs solid (for dropdown filter)
+    dashed_trace_indices = []
+    solid_trace_indices = []
+    
+    # Track edge labels separately for solid vs dashed edges
+    solid_edge_labels_x = []
+    solid_edge_labels_y = []
+    solid_edge_labels_text = []
+    dashed_edge_labels_x = []
+    dashed_edge_labels_y = []
+    dashed_edge_labels_text = []
+    
+    # Track which annotation indices belong to solid edges (arrows)
+    solid_annotation_indices = []
     
     for edge in graph.edges():
         # Skip if this is the reverse direction of an undirected edge we've already drawn
@@ -114,7 +124,6 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
         do_direction = edge_data.get('do_direction', None)
         
         # Store edge label position (midpoint, offset slightly for readability) and text
-        # No labels for undirected/dashed edges (LLM-only, no data)
         mid_x = (x0 + x1) / 2
         mid_y = (y0 + y1) / 2
         # Offset label perpendicular to edge direction for readability
@@ -126,9 +135,9 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
             offset_scale = 0.03
             mid_x += (-dy / length) * offset_scale
             mid_y += (dx / length) * offset_scale
-        edge_labels_x.append(mid_x)
-        edge_labels_y.append(mid_y)
-        # Prefer do-operator probability if available; fall back to prior_strength
+        
+        # Determine label text
+        label_text = ""
         if do_probability is not None and not is_undirected_edge:
             direction_symbol = ""
             if do_direction == "positive":
@@ -137,11 +146,24 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                 direction_symbol = "↓"
             elif do_direction == "neutral":
                 direction_symbol = "→"
-            edge_labels_text.append(f"P={do_probability:.2f}{direction_symbol}")
+            elif do_direction == "shift":
+                direction_symbol = "⇄"
+            label_text = f"P={do_probability:.2f}{direction_symbol}"
+        elif is_undirected_edge and do_probability is not None:
+            # Dashed edge with ATE data (ATE=0 or failed) — show label
+            label_text = f"P={do_probability:.2f}→"
         elif strength > 0 and not is_undirected_edge:
-            edge_labels_text.append(f"{strength:.2f}")
+            label_text = f"{strength:.2f}"
+        
+        # Split labels into solid vs dashed buckets for dropdown filtering
+        if is_undirected_edge:
+            dashed_edge_labels_x.append(mid_x)
+            dashed_edge_labels_y.append(mid_y)
+            dashed_edge_labels_text.append(label_text)
         else:
-            edge_labels_text.append("")
+            solid_edge_labels_x.append(mid_x)
+            solid_edge_labels_y.append(mid_y)
+            solid_edge_labels_text.append(label_text)
         
         edge_color = 'red'
         edge_width = 2
@@ -183,7 +205,7 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
             length = math.sqrt(dx*dx + dy*dy)
             if length > 0:
                 dx_norm, dy_norm = dx / length, dy / length
-                node_radius = 0.05
+                node_radius = 0.08
                 x1_short = x1 - dx_norm * node_radius
                 y1_short = y1 - dy_norm * node_radius
                 x0_short = x0 + dx_norm * node_radius
@@ -229,23 +251,29 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
                     mode='lines', 
                     showlegend=False
                 ))
+                # Track trace index for dropdown filter
+                if is_undirected:
+                    dashed_trace_indices.append(len(fig.data) - 1)
+                else:
+                    solid_trace_indices.append(len(fig.data) - 1)
 
                 # Add arrow for ALL directed edges (not undirected)
                 if not is_undirected:
-                    arrow_x = x0_short + 0.85 * (x1_short - x0_short)
-                    arrow_y = y0_short + 0.85 * (y1_short - y0_short)
-                    arrow_end_x = arrow_x + 0.03 * dx_norm
-                    arrow_end_y = arrow_y + 0.03 * dy_norm
+                    arrow_x = x0_short + 0.95 * (x1_short - x0_short)
+                    arrow_y = y0_short + 0.95 * (y1_short - y0_short)
+                    arrow_end_x = arrow_x + 0.02 * dx_norm
+                    arrow_end_y = arrow_y + 0.02 * dy_norm
                     
                     fig.add_annotation(
                         x=arrow_end_x, y=arrow_end_y,
-                        ax=arrow_x - 0.03 * dx_norm, 
-                        ay=arrow_y - 0.03 * dy_norm,
+                        ax=arrow_x - 0.02 * dx_norm, 
+                        ay=arrow_y - 0.02 * dy_norm,
                         arrowhead=2, arrowsize=2, arrowwidth=2,
                         arrowcolor=edge_color, showarrow=True,
                         axref='x', ayref='y',
                         xref='x', yref='y'
                     )
+                    solid_annotation_indices.append(len(fig.layout.annotations) - 1)
             else:
                 # Fallback for zero-length edges (shouldn't happen but handle gracefully)
                 fig.add_trace(go.Scatter(
@@ -350,33 +378,49 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
     causal_info = " + Causal Inference" if causal_summary else ""
     fig.add_trace(node_trace)
     
-    # Add edge strength labels
-    if edge_labels_x:
-        # Color edge labels based on do-operator direction
-        edge_label_colors = []
-        for text in edge_labels_text:
+    # Add edge strength labels — separate traces for solid vs dashed (for dropdown filtering)
+    def _make_label_colors(texts):
+        colors = []
+        for text in texts:
             if '↑' in text:
-                edge_label_colors.append('lime')       # positive/direct
+                colors.append('lime')
             elif '↓' in text:
-                edge_label_colors.append('#ff6666')    # negative/inverse
+                colors.append('#ff6666')
             elif '→' in text:
-                edge_label_colors.append('yellow')     # neutral
+                colors.append('yellow')
             elif text:
-                edge_label_colors.append('cyan')       # prior_strength fallback
+                colors.append('cyan')
             else:
-                edge_label_colors.append('cyan')
-        
-        edge_labels_trace = go.Scatter(
-            x=edge_labels_x, 
-            y=edge_labels_y,
+                colors.append('cyan')
+        return colors
+    
+    solid_labels_trace_idx = None
+    if solid_edge_labels_x:
+        solid_labels_trace_idx = len(fig.data)
+        fig.add_trace(go.Scatter(
+            x=solid_edge_labels_x, 
+            y=solid_edge_labels_y,
             mode='text',
-            text=edge_labels_text,
+            text=solid_edge_labels_text,
             textposition="middle center",
-            textfont=dict(size=10, color=edge_label_colors, family='Arial Bold'),
+            textfont=dict(size=10, color=_make_label_colors(solid_edge_labels_text), family='Arial Bold'),
             hoverinfo='skip',
             showlegend=False
-        )
-        fig.add_trace(edge_labels_trace)
+        ))
+    
+    dashed_labels_trace_idx = None
+    if dashed_edge_labels_x:
+        dashed_labels_trace_idx = len(fig.data)
+        fig.add_trace(go.Scatter(
+            x=dashed_edge_labels_x, 
+            y=dashed_edge_labels_y,
+            mode='text',
+            text=dashed_edge_labels_text,
+            textposition="middle center",
+            textfont=dict(size=10, color=_make_label_colors(dashed_edge_labels_text), family='Arial Bold'),
+            hoverinfo='skip',
+            showlegend=False
+        ))
     
     # Add legend for edge colors and causal inference roles
     if target_factor:
@@ -421,18 +465,91 @@ def visualize_graph(engine, graph: Union[nx.Graph, nx.DiGraph], title: str = "Gr
     fig_width = max(1100, 600 + 70 * n_nodes)
     fig_height = max(700, 400 + 45 * n_nodes)
 
+    # Build dropdown filter for dashed/solid edges (including labels and arrows)
+    total_traces = len(fig.data)
+    dropdown_buttons = []
+    if dashed_trace_indices:
+        # Collect all solid-related trace indices (edge lines + labels)
+        all_solid_traces = solid_trace_indices[:]
+        if solid_labels_trace_idx is not None:
+            all_solid_traces.append(solid_labels_trace_idx)
+        
+        # Collect all dashed-related trace indices (edge lines + labels)
+        all_dashed_traces = dashed_trace_indices[:]
+        if dashed_labels_trace_idx is not None:
+            all_dashed_traces.append(dashed_labels_trace_idx)
+
+        # "All Edges" — show everything, all arrows visible
+        all_visible = [True] * total_traces
+        all_annotations = list(fig.layout.annotations)
+        dropdown_buttons.append(dict(
+            label="All Edges",
+            method="update",
+            args=[
+                {"visible": all_visible},
+                {"annotations": all_annotations}
+            ]
+        ))
+        
+        # "Verified Only" — hide dashed edges and their labels, keep arrows
+        verified_visible = [True] * total_traces
+        for idx in all_dashed_traces:
+            verified_visible[idx] = False
+        dropdown_buttons.append(dict(
+            label="Verified Only (hide dashed)",
+            method="update",
+            args=[
+                {"visible": verified_visible},
+                {"annotations": all_annotations}
+            ]
+        ))
+        
+        # "Unverified Only" — hide solid edges, their labels, AND arrows
+        unverified_visible = [True] * total_traces
+        for idx in all_solid_traces:
+            unverified_visible[idx] = False
+        # Build annotations list with arrow annotations hidden (keep legend annotation)
+        unverified_annotations = []
+        for i, ann in enumerate(all_annotations):
+            if i in solid_annotation_indices:
+                # Hide this arrow annotation
+                ann_dict = ann.to_plotly_json()
+                ann_dict['showarrow'] = False
+                ann_dict['visible'] = False
+                unverified_annotations.append(ann_dict)
+            else:
+                unverified_annotations.append(ann)
+        dropdown_buttons.append(dict(
+            label="Unverified Only (dashed)",
+            method="update",
+            args=[
+                {"visible": unverified_visible},
+                {"annotations": unverified_annotations}
+            ]
+        ))
+
     fig.update_layout(
         title=dict(
             text=f"{title} ({graph_type}){degree_info}{causal_info} - {len(graph.nodes())} nodes, {len(graph.edges())} edges - Bayesian", 
             x=0.5, font=dict(size=16, color='white')
         ),
         showlegend=False, hovermode='closest',
-        margin=dict(b=20, l=5, r=200, t=60),
+        margin=dict(b=20, l=5, r=200, t=80),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         width=fig_width, height=fig_height, 
         plot_bgcolor='black',
-        paper_bgcolor='black'
+        paper_bgcolor='black',
+        updatemenus=[dict(
+            type="dropdown",
+            direction="down",
+            x=0.0, y=1.12,
+            xanchor="left", yanchor="top",
+            bgcolor="rgba(50,50,50,0.8)",
+            font=dict(color="white", size=11),
+            buttons=dropdown_buttons,
+            showactive=True,
+        )] if dropdown_buttons else [],
     )
 
     return fig

@@ -100,7 +100,7 @@ class TestVisualizationEdgeLabels:
         assert '#ff6666' in colors
 
     def test_undirected_edge_no_do_label(self):
-        """Undirected (dashed) edges should not show do-operator labels."""
+        """Undirected (dashed) edges with do_probability should show label."""
         from causalif.visualization import visualize_graph
 
         engine = self._make_engine_stub()
@@ -111,8 +111,8 @@ class TestVisualizationEdgeLabels:
         fig = visualize_graph(engine, graph, title="Test", target_factor=None)
         text_traces = [t for t in fig.data if t.mode == 'text']
         labels = text_traces[0].text
-        # Undirected edges should have empty labels
-        assert all(lbl == '' for lbl in labels)
+        # Undirected edges with do_probability should show the label
+        assert any('P=0.50' in str(lbl) for lbl in labels)
 
     def test_edge_width_uses_do_probability(self):
         """Edge width should be modulated by do_probability when available."""
