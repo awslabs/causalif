@@ -16,9 +16,10 @@
 5. [Installation](#installation)
 6. [Usage Examples](#usage-examples)
 7. [Architecture](#architecture)
-8. [Limitations](#limitations)
-9. [Contributing](#contributing)
-10. [License](#license)
+8. [Benchmark Results](#benchmark-results)
+9. [Limitations](#limitations)
+10. [Contributing](#contributing)
+11. [License](#license)
 
 ## Overview
 
@@ -36,6 +37,9 @@ Best used as a tool in agentic systems for interpreting causal relationships.
 The direct, indirect and independent association algorithm (causalif_1_edge_existence_verification) is inspired by LACR 1 algorithm: https://arxiv.org/html/2402.15301v2
 
 Note: It is an experimental project which is dependent on quality RAG documents, model knowledge and data size for its analysis.
+
+**Benchmark Results**: Average directed F1 score of **0.83** across 7 standard causal discovery benchmarks (ASIA, Sachs, ALARM, and 4 structural tests), outperforming both Hill Climb-BDeu (0.58) and PC algorithm (0.45). Results may vary ±0.1 across runs due to LLM response variability. See [examples/causalif-library-benchmark.ipynb](examples/causalif-library-benchmark.ipynb) for full reproducible results.
+
 ---
 
 ## Ideal Use Cases
@@ -349,7 +353,48 @@ causalif/
 ├── engine.py         # CausalIF algorithm
 ├── prompts.py        # LLM prompts
 ├── tool.py           # API & LangChain integration
+├── benchmarks.py     # Accuracy evaluation & baselines
 └── visualization.py  # Plotly graphs
+```
+
+---
+
+## Benchmark Results
+
+CausalIF was evaluated against standard causal discovery benchmark networks using directed F1 score (edge existence + correct orientation). Baselines (Hill Climb with BDeu, PC algorithm) were run on the same synthetic data with no LLM prior.
+
+**Directed F1 Score** (higher is better, 1.0 = perfect):
+
+| Benchmark | CausalIF | HillClimb-BDeu | PC |
+|---|---|---|---|
+| ASIA (8 nodes, 8 edges) | **0.875** | 0.533 | 0.750 |
+| Sachs (11 nodes, 17 edges) | **0.667** | 0.439 | 0.323 |
+| ALARM subset (13 nodes, 12 edges) | **0.750** | 0.667 | 0.296 |
+| Causal Chain (4 nodes) | **1.000** | 0.667 | 0.286 |
+| Common Cause (4 nodes) | **0.857** | 0.667 | 0.750 |
+| Collider (4 nodes) | **1.000** | 0.545 | 0.500 |
+| Diamond (4 nodes) | **0.667** | 0.571 | 0.222 |
+| **Average** | **0.831** | 0.584 | 0.447 |
+
+**Conditions**: 1000 samples, seed=42, Claude Sonnet 4 (temperature=0), bootstrap_iterations=50, bootstrap_threshold=0.7, no RAG retriever (LLM background knowledge only).
+
+**Notes**:
+- Results may vary ±0.1 across runs due to LLM response variability, even at temperature=0.
+- CausalIF requires meaningful variable names and factor descriptions for the LLM to reason about domain relationships. Abstract single-letter variables (A, B, C) with no domain context will perform poorly.
+- Baselines use the same discretized data. HillClimb-BDeu is the most direct comparison since CausalIF also uses Hill Climb internally — the difference is the LLM-informed prior.
+
+**Reproducing**:
+```python
+from causalif import BenchmarkSuite, compare_all_with_baselines
+from langchain_aws import ChatBedrockConverse
+
+model = ChatBedrockConverse(model_id="global.anthropic.claude-sonnet-4-6", temperature=0.0, region_name="us-west-2")
+suite = BenchmarkSuite(model=model, bootstrap_iterations=50, bootstrap_threshold=0.7)
+results = suite.run_all(n_samples=1000)
+print(suite.summary_table(results))
+
+# Baselines (no LLM needed)
+baselines_df = compare_all_with_baselines(n_samples=1000)
 ```
 
 ---
@@ -387,6 +432,7 @@ This project is licensed under the Apache-2.0 License. See [LICENSE](LICENSE) fo
 
 ## Version History
 
+- **v0.1.10**: Benchmarking module (`causalif.benchmarks`) for accuracy evaluation against ground-truth DAGs. Includes F1/precision/recall/SHD metrics, standard benchmark networks (ASIA, Sachs, ALARM), synthetic data generation, baseline comparison (PC, Hill Climb-BDeu), and sensitivity analysis. Average directed F1: 0.83 across 7 benchmarks.
 - **v0.1.9.9**: Dropdown filter for verified/unverified edges (hides arrows and labels when filtering), dashed edge labels for ATE=0 or failed edges, improved arrow positioning (closer to target nodes), spring layout restored for reliable arrow rendering on all edges.
 - **v0.1.9.8**: Do-operator (ATE) probabilities and direction labels on all graph edges, pgmpy 1.1+ API migration, adaptive edge pruning (ATE < 0.01 removed), LLM-based causal direction verification (Step 2b), factor_descriptions parameter for column definitions, improved node spacing in visualization.
 - **v0.1.9.7**: Improved numerical stability in discretization pipeline, refined prior contribution diagnostics, and adaptive graph visualization for larger causal structures.

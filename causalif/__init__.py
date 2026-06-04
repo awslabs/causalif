@@ -6,7 +6,7 @@ CausalIF: Language-Augmented Causal Reasoning with Bayesian Inference
 
 import logging
 
-__version__ = "0.1.9.9"
+__version__ = "0.1.10"
 __author__ = "Subhro Bose"
 __email__ = "bossubhr@amazon.co.uk"
 
@@ -40,6 +40,21 @@ from .tool import (
 
 from .visualization import visualize_causalif_results, visualize_graph
 
+from .benchmarks import (
+    evaluate_graph,
+    evaluate_causalif_result,
+    run_benchmark,
+    sensitivity_analysis,
+    generate_data_from_dag,
+    generate_binary_data_from_dag,
+    run_baselines,
+    compare_all_with_baselines,
+    BenchmarkSuite,
+    BenchmarkResult,
+    GraphMetrics,
+    BENCHMARK_REGISTRY,
+)
+
 __all__ = [
     'KnowledgeBase',
     'CausalIFEngine',
@@ -54,5 +69,18 @@ __all__ = [
     'causalif_intervene',
     'parse_intervention_query',
     'visualize_causalif_results',
-    'visualize_graph'
+    'visualize_graph',
+    # Benchmarking
+    'evaluate_graph',
+    'evaluate_causalif_result',
+    'run_benchmark',
+    'sensitivity_analysis',
+    'generate_data_from_dag',
+    'generate_binary_data_from_dag',
+    'run_baselines',
+    'compare_all_with_baselines',
+    'BenchmarkSuite',
+    'BenchmarkResult',
+    'GraphMetrics',
+    'BENCHMARK_REGISTRY',
 ]
