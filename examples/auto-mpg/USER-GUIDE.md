@@ -57,10 +57,14 @@ follow the numbered actions.
 - **An AWS account** you can sign in to, with permission to use IAM, S3,
   Amazon Bedrock, and Amazon SageMaker AI. If someone else manages your account,
   ask them to confirm you have access to these four services.
-- **Amazon Bedrock model access enabled.** Bedrock models are off by default in
-  a new account. See
-  [Appendix A: Enable Bedrock model access](#appendix-a-enable-bedrock-model-access)
-  to turn on the Claude model this demo uses.
+- **Amazon Bedrock model access.** You no longer enable models on a "Model
+  access" page — that page is retired. Serverless foundation models are
+  automatically enabled the first time they're invoked in your account. Two
+  things to know: (a) for **Anthropic Claude** models, a first-time user may be
+  asked to submit brief use-case details before the first call succeeds, and
+  (b) your account admin can still restrict models via IAM policies or Service
+  Control Policies. See
+  [Appendix A: Bedrock model access](#appendix-a-bedrock-model-access) for details.
 - **The reference documents are published on GitHub.** The notebook downloads
   them from the public repo at
   `https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base/`.
@@ -100,18 +104,21 @@ You create it once.
    your chosen supported Region).
 2. In the search bar, type **SageMaker** and open **Amazon SageMaker AI**.
 3. In the left sidebar choose **Domains**, then **Create domain**.
+![SageMaker AI Domains page with the Create domain button](screenshots/create-domain.png)
 4. Choose **Set up for single user (Quick setup)**. This is the fastest path for
    a demo — AWS fills in sensible defaults and creates the needed role for you.
+![Create domain dialog with Set up for single user (Quick setup) selected](screenshots/domain-quick-setup.png)
 5. If prompted, allow it to **create a new execution role**. **Note the role
    name** that appears (usually contains `AmazonSageMaker-ExecutionRole`) — you
    grant it permissions in Step 2.
 6. Choose **Submit** / **Create domain**.
 7. Wait until the domain **Status** becomes **InService** (a few minutes; the
    page refreshes itself).
+![Domain creation success confirmation](screenshots/domain-success.png)
+8. In the left sidebar choose **Domains**, click on QuickSetupDomain to know the execution role.
+![Domain detail page showing Status InService](screenshots/domain-in-service.png)
+![Domain settings showing the execution role name](screenshots/domain-iam-role.png)
 
-> _[Screenshot placeholder: SageMaker AI → Domains → Create domain → Quick setup selected]_
->
-> _[Screenshot placeholder: Domain list showing Status = InService]_
 
 **Checkpoint:** Your domain shows **InService** and you know the name of its
 **execution role**.
@@ -129,28 +136,106 @@ Bedrock knowledge base, the execution role needs permission to do those things.
 
 1. In the AWS console go to **IAM** → **Roles**.
 2. Find and open the SageMaker execution role from Step 1.
-3. Choose **Add permissions** → **Attach policies**.
-4. Attach policies that cover what the setup cell does. For a **workshop/demo**,
-   the simplest set is:
-   - **`AmazonBedrockFullAccess`** — create/use the knowledge base and invoke the model.
-   - **`AmazonS3FullAccess`** — create the bucket and copy the documents.
-   - **`IAMFullAccess`** — create the small role the knowledge base assumes.
+3. Choose **Add permissions** → **Create inline policy**.
+4. Choose the **JSON** tab. **Delete** whatever is in the editor and **paste**
+   the policy below in its place.
+5. Choose **Next**, give the policy a name (for example `CausalIFDemoSetup`), and
+   choose **Create policy**.
 
-   > These are broad, demo-friendly policies. For a **production** account,
-   > replace them with a scoped policy granting only:
-   > `s3:CreateBucket`, `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`;
-   > `iam:CreateRole`, `iam:PutRolePolicy`, `iam:GetRole`, `iam:PassRole`;
-   > `bedrock:CreateKnowledgeBase`, `bedrock:CreateDataSource`,
-   > `bedrock:StartIngestionJob`, `bedrock:GetKnowledgeBase`,
-   > `bedrock:GetIngestionJob`, `bedrock:ListKnowledgeBases`,
-   > `bedrock:ListDataSources`, `bedrock:InvokeModel`; and
-   > `bedrock-agent-runtime:Retrieve`.
-5. Choose **Add permissions** to save.
+This single inline policy grants everything the setup cell needs — creating the
+S3 bucket and uploading the documents, creating the small IAM role the knowledge
+base assumes, provisioning and syncing the managed knowledge base, querying it,
+and invoking the Bedrock model:
 
-> _[Screenshot placeholder: IAM role → Add permissions with the three policies attached]_
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3BucketAndDocs",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::causalif-analyticon2026-*",
+        "arn:aws:s3:::causalif-analyticon2026-*/*"
+      ]
+    },
+    {
+      "Sid": "CreateKBServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole"
+    },
+    {
+      "Sid": "PassKBRoleToBedrock",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "bedrock.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "ManagedKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateKnowledgeBase",
+        "bedrock:GetKnowledgeBase",
+        "bedrock:ListKnowledgeBases",
+        "bedrock:CreateDataSource",
+        "bedrock:GetDataSource",
+        "bedrock:ListDataSources",
+        "bedrock:StartIngestionJob",
+        "bedrock:GetIngestionJob",
+        "bedrock:ListIngestionJobs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RetrieveAndInvokeModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock:InvokeModel",
+        "bedrock:Rerank"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
 
-**Checkpoint:** The SageMaker execution role has Bedrock, S3, and IAM
-permissions attached.
+Notes on the policy:
+
+- The S3 statement is scoped to bucket names starting with
+  `causalif-analyticon2026-` (the auto-generated name in the notebook). **If you
+  set a custom `TARGET_BUCKET`, change both `Resource` ARNs** to match your
+  bucket name.
+- The IAM statements are scoped to the single role name `CausalIFAutoMpgKBRole`
+  (the notebook's `KB_ROLE_NAME`). If you change `KB_ROLE_NAME`, update these
+  ARNs too.
+- `bedrock:Retrieve` is the action that authorizes the knowledge-base query the
+  retriever tool makes at runtime.
+
+**Simpler (broader) alternative for a throwaway demo account:** instead of the
+inline policy, choose **Add permissions → Attach policies** and attach the
+AWS-managed **`AmazonBedrockFullAccess`**, **`AmazonS3FullAccess`**, and
+**`IAMFullAccess`**. This is easier but much broader — prefer the scoped inline
+policy above, especially in a shared or production account.
+
+
+**Checkpoint:** The SageMaker execution role has the `CausalIFDemoSetup` inline
+policy (or the three managed policies) attached.
 
 ---
 
@@ -163,6 +248,7 @@ opens and runs. Here you choose how much compute you get.
 
 1. From **SageMaker AI** → **Domains**, open your domain and **Launch** →
    **Studio** for your user profile. SageMaker Studio opens in a new tab.
+   ![SageMaker Studio open in the browser](screenshots/studio-open.png)
 2. In Studio's left sidebar, choose **JupyterLab**.
 3. Choose **Create JupyterLab space**.
    - **Name:** `causalif-mpg`.
@@ -171,17 +257,14 @@ opens and runs. Here you choose how much compute you get.
    - **Instance type:** select **`ml.r5.4xlarge`** (a memory-optimized machine;
      the causal analysis benefits from the extra RAM).
    - **Storage (EBS):** set to **50 GB** (room for packages and data).
-5. Choose **Run space**. The status moves to **Starting**, then **Running** (a
-   couple of minutes).
+5. Choose **Run space**. The status moves to **Starting**, then **Running** (may take upto 10 mins).
+   ![JupyterLab space creation with instance type ml.r5.4xlarge and 50 GB storage](screenshots/space-creation.png)
 6. When it shows **Running**, choose **Open JupyterLab**.
+![JupyterLab space with status Running and the Open JupyterLab button](screenshots/space-running.png)
 
 > **Heads-up on cost:** the `ml.r5.4xlarge` instance is billed per hour while the
 > space is **Running**, whether or not a notebook is executing. **Stop the
 > space** when you take a break (see [Cleanup](#7-cleanup-stop-paying-when-youre-done)).
-
-> _[Screenshot placeholder: JupyterLab space creation with instance type ml.r5.4xlarge and 50 GB storage]_
->
-> _[Screenshot placeholder: Space status = Running with the Open JupyterLab button]_
 
 **Checkpoint:** JupyterLab is open, running on an `ml.r5.4xlarge` space with
 50 GB storage.
@@ -196,6 +279,7 @@ round-trip, no AWS credentials needed.
 **Option A — one command in a terminal (recommended):**
 
 1. In JupyterLab, choose **File** → **New** → **Terminal**.
+![JupyterLab File menu opening a new Terminal](screenshots/jupyter-terminal.png)
 2. Run:
    ```bash
    curl -O https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/causalif-mpg-demo.ipynb
@@ -208,10 +292,6 @@ file browser and select it.
 
 **If JupyterLab asks you to pick a kernel**, choose the default **Python 3**
 kernel.
-
-> _[Screenshot placeholder: JupyterLab terminal running the curl command]_
->
-> _[Screenshot placeholder: The opened notebook showing its first title cell]_
 
 **Checkpoint:** `causalif-mpg-demo.ipynb` is open in JupyterLab.
 
@@ -320,8 +400,8 @@ Do these when you finish so you stop incurring charges:
    `CausalIFAutoMpgKBRole` → delete.
 5. **Delete the SageMaker domain** (optional): SageMaker AI → **Domains** →
    delete if you won't reuse it (delete spaces/apps first).
-6. **Bedrock model access** carries no standing charge (you pay per call), so you
-   can leave it enabled.
+6. **Bedrock models** carry no standing charge (you pay per call) and require no
+   teardown — there's nothing to "disable."
 
 > _[Screenshot placeholder: JupyterLab space with the Stop space button]_
 
@@ -334,8 +414,8 @@ Do these when you finish so you stop incurring charges:
 | Section 0 fails creating the bucket / role | Execution role missing S3 or IAM permission | Attach the policies in Step 2. |
 | Section 0 fails creating the knowledge base | Region doesn't support managed KBs, or missing Bedrock permission | Use a supported Region (e.g. `us-west-2`); confirm `AmazonBedrockFullAccess` (or the scoped Bedrock actions). |
 | "Failed to download reference document from https://raw.githubusercontent.com/..." | Files not pushed/public, or wrong URL | Confirm `GITHUB_RAW_BASE`/`KB_DOC_FILES`; open a raw URL in a browser to verify the files are published (Appendix B). |
-| `AccessDenied` / "You don't have access to the model" in Section 5 | Bedrock model access not enabled, or wrong Region | Enable the model in **Bedrock → Model access** for your Region (Appendix A); confirm `AWS_REGION` and `BEDROCK_MODEL_ID` match. |
-| Retriever cell errors on `Retrieve` | KB id wrong, or `bedrock-agent-runtime:Retrieve` not permitted | Re-run Section 0 to reset `KNOWLEDGE_BASE_ID`; confirm the Bedrock permission. |
+| `AccessDenied` / "You don't have access to the model" in Section 5 | First-time Anthropic use-case form not submitted, IAM/SCP restriction, or wrong Region | Models auto-enable on first use, but Anthropic may require a one-time use-case submission — complete it in **Bedrock → Model catalog** (Appendix A). Confirm no IAM/SCP blocks the model and that `AWS_REGION` / `BEDROCK_MODEL_ID` match. |
+| Retriever cell errors on `Retrieve` | KB id wrong, or `bedrock:Retrieve` not permitted | Re-run Section 0 to reset `KNOWLEDGE_BASE_ID`; confirm the `bedrock:Retrieve` permission (in the Step 2 policy). |
 | "Unable to locate credentials" / token expired | Not running under the SageMaker role, or session expired | Ensure you're inside the SageMaker JupyterLab space; restart the kernel. |
 | Import errors after install | Kernel started before packages installed | **Kernel → Restart Kernel**, then run all cells again. |
 | Empty causal graph | Bedrock throttling emptied the graph | Re-run; the notebook already keeps concurrency low (`max_parallel_queries=2`). |
@@ -361,27 +441,37 @@ Do these when you finish so you stop incurring charges:
 
 ---
 
-## Appendix A: Enable Bedrock model access
+## Appendix A: Bedrock model access
 
-New AWS accounts have Bedrock foundation models turned **off**. Enable the model
-this demo uses:
+**You no longer manually enable model access.** Amazon has retired the "Model
+access" page. Serverless foundation models are automatically enabled across AWS
+commercial Regions the first time they are invoked in your account, so the
+notebook can call the model without any pre-activation step.
 
-1. Open **Amazon Bedrock** and confirm the Region (top-right) is the one you'll
-   run in (default `us-west-2`).
-2. In the left sidebar, choose **Model access** (under **Bedrock configurations**).
-3. Choose **Enable specific models** (or **Manage model access**).
-4. Enable an **Anthropic Claude** model. The notebook default expects a US Claude
-   Sonnet profile in **us-west-2**
-   (`us.anthropic.claude-sonnet-4-20250514-v1:0`). In a different Region, enable
-   the equivalent Claude model available there and set its exact **model ID** as
-   `BEDROCK_MODEL_ID` in Step 5.
-5. Submit and wait until the model's status shows **Access granted**.
+A few things to be aware of:
 
-> **Finding the exact model ID:** on the **Model access** / **Model catalog**
-> page, open the model to see its ID string. Regions use different prefixes
-> (`us.` for the US, `eu.` for Europe), so copy the ID for *your* Region.
+- **Anthropic Claude first-time use.** For Anthropic models, a first-time user
+  may be prompted to submit brief **use-case details** before the first
+  invocation is allowed. If your very first run fails with an access/eligibility
+  message mentioning use-case submission, complete that one-time form in the
+  Bedrock console (**Model catalog** → open the Claude model), then re-run.
+- **Admin restrictions still apply.** Account administrators can restrict which
+  models are usable through **IAM policies** and **Service Control Policies
+  (SCPs)**. If a call is denied, confirm with your admin that the Claude model in
+  your Region isn't blocked by policy. (The execution role also needs
+  `bedrock:InvokeModel` — covered by `AmazonBedrockFullAccess` in Step 2.)
+- **AWS Marketplace models** (not used by this demo's default) require a user
+  with Marketplace permissions to invoke the model once to enable it
+  account-wide.
 
-> _[Screenshot placeholder: Bedrock → Model access with a Claude model showing Access granted]_
+**Confirming the exact model ID for your Region.** The notebook default is the US
+Claude Sonnet profile for **us-west-2**
+(`us.anthropic.claude-sonnet-4-20250514-v1:0`). To use a different Region, open
+**Amazon Bedrock** → **Model catalog**, open the Claude model, and copy its exact
+**model ID** into `BEDROCK_MODEL_ID` (Step 5). Regions use different prefixes
+(`us.` for the US, `eu.` for Europe), so copy the ID for *your* Region.
+
+> _[Screenshot placeholder: Bedrock → Model catalog → Claude model detail showing the model ID]_
 
 ---
 
