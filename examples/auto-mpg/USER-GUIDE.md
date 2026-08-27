@@ -57,10 +57,14 @@ follow the numbered actions.
 - **An AWS account** you can sign in to, with permission to use IAM, S3,
   Amazon Bedrock, and Amazon SageMaker AI. If someone else manages your account,
   ask them to confirm you have access to these four services.
-- **Amazon Bedrock model access enabled.** Bedrock models are off by default in
-  a new account. See
-  [Appendix A: Enable Bedrock model access](#appendix-a-enable-bedrock-model-access)
-  to turn on the Claude model this demo uses.
+- **Amazon Bedrock model access.** You no longer enable models on a "Model
+  access" page — that page is retired. Serverless foundation models are
+  automatically enabled the first time they're invoked in your account. Two
+  things to know: (a) for **Anthropic Claude** models, a first-time user may be
+  asked to submit brief use-case details before the first call succeeds, and
+  (b) your account admin can still restrict models via IAM policies or Service
+  Control Policies. See
+  [Appendix A: Bedrock model access](#appendix-a-bedrock-model-access) for details.
 - **The reference documents are published on GitHub.** The notebook downloads
   them from the public repo at
   `https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base/`.
@@ -100,18 +104,21 @@ You create it once.
    your chosen supported Region).
 2. In the search bar, type **SageMaker** and open **Amazon SageMaker AI**.
 3. In the left sidebar choose **Domains**, then **Create domain**.
+![SageMaker AI Domains page with the Create domain button](screenshots/create-domain.png)
 4. Choose **Set up for single user (Quick setup)**. This is the fastest path for
    a demo — AWS fills in sensible defaults and creates the needed role for you.
+![Create domain dialog with Set up for single user (Quick setup) selected](screenshots/domain-quick-setup.png)
 5. If prompted, allow it to **create a new execution role**. **Note the role
    name** that appears (usually contains `AmazonSageMaker-ExecutionRole`) — you
    grant it permissions in Step 2.
 6. Choose **Submit** / **Create domain**.
 7. Wait until the domain **Status** becomes **InService** (a few minutes; the
    page refreshes itself).
+![Domain creation success confirmation](screenshots/domain-success.png)
+8. In the left sidebar choose **Domains**, click on QuickSetupDomain to know the execution role.
+![Domain detail page showing Status InService](screenshots/domain-in-service.png)
+![Domain settings showing the execution role name](screenshots/domain-iam-role.png)
 
-> _[Screenshot placeholder: SageMaker AI → Domains → Create domain → Quick setup selected]_
->
-> _[Screenshot placeholder: Domain list showing Status = InService]_
 
 **Checkpoint:** Your domain shows **InService** and you know the name of its
 **execution role**.
@@ -129,28 +136,122 @@ Bedrock knowledge base, the execution role needs permission to do those things.
 
 1. In the AWS console go to **IAM** → **Roles**.
 2. Find and open the SageMaker execution role from Step 1.
-3. Choose **Add permissions** → **Attach policies**.
-4. Attach policies that cover what the setup cell does. For a **workshop/demo**,
-   the simplest set is:
-   - **`AmazonBedrockFullAccess`** — create/use the knowledge base and invoke the model.
-   - **`AmazonS3FullAccess`** — create the bucket and copy the documents.
-   - **`IAMFullAccess`** — create the small role the knowledge base assumes.
+3. Choose **Add permissions** → **Create inline policy**.
+4. Choose the **JSON** tab. **Delete** whatever is in the editor and **paste**
+   the policy below in its place.
+5. Choose **Next**, give the policy a name (for example `CausalIFDemoSetup`), and
+   choose **Create policy**.
 
-   > These are broad, demo-friendly policies. For a **production** account,
-   > replace them with a scoped policy granting only:
-   > `s3:CreateBucket`, `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`;
-   > `iam:CreateRole`, `iam:PutRolePolicy`, `iam:GetRole`, `iam:PassRole`;
-   > `bedrock:CreateKnowledgeBase`, `bedrock:CreateDataSource`,
-   > `bedrock:StartIngestionJob`, `bedrock:GetKnowledgeBase`,
-   > `bedrock:GetIngestionJob`, `bedrock:ListKnowledgeBases`,
-   > `bedrock:ListDataSources`, `bedrock:InvokeModel`; and
-   > `bedrock-agent-runtime:Retrieve`.
-5. Choose **Add permissions** to save.
+This single inline policy grants everything the setup cell needs — creating the
+S3 bucket and uploading the documents, creating the small IAM role the knowledge
+base assumes, provisioning and syncing the managed knowledge base, querying it,
+and invoking the Bedrock model:
 
-> _[Screenshot placeholder: IAM role → Add permissions with the three policies attached]_
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3BucketAndDocs",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::causalif-analyticon2026-*",
+        "arn:aws:s3:::causalif-analyticon2026-*/*"
+      ]
+    },
+    {
+      "Sid": "CreateKBServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole"
+    },
+    {
+      "Sid": "PassKBRoleToBedrock",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "bedrock.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "ManagedKnowledgeBase",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateKnowledgeBase",
+        "bedrock:GetKnowledgeBase",
+        "bedrock:ListKnowledgeBases",
+        "bedrock:CreateDataSource",
+        "bedrock:GetDataSource",
+        "bedrock:ListDataSources",
+        "bedrock:StartIngestionJob",
+        "bedrock:GetIngestionJob",
+        "bedrock:ListIngestionJobs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RetrieveAndInvokeModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream",
+        "bedrock:Rerank"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
 
-**Checkpoint:** The SageMaker execution role has Bedrock, S3, and IAM
-permissions attached.
+> **Cross-region inference profiles need invoke access on every underlying
+> Region.** The default `BEDROCK_MODEL_ID` is a US inference *profile* (the `us.`
+> prefix) that routes each call to Claude in **us-east-1, us-east-2, or
+> us-west-2**. The `"Resource": "*"` above already covers all of them. If you
+> tighten this statement to specific ARNs, include **both** the inference-profile
+> ARN **and** the foundation-model ARN in each of those three Regions. To keep it
+> simple, leave the `bedrock` invoke actions on `*`.
+>
+> Note: this is about *permissions*. A different error —
+> `ResourceNotFoundException ... marked by provider as Legacy` — means the model
+> itself is retired; fix that by choosing a current `BEDROCK_MODEL_ID` (see
+> Troubleshooting), not by changing IAM.
+
+Notes on the policy:
+
+- The S3 statement is scoped to bucket names starting with
+  `causalif-analyticon2026-` (the auto-generated name in the notebook). **If you
+  set a custom `TARGET_BUCKET`, change both `Resource` ARNs** to match your
+  bucket name.
+- The IAM statements are scoped to the single role name `CausalIFAutoMpgKBRole`
+  (the notebook's `KB_ROLE_NAME`). If you change `KB_ROLE_NAME`, update these
+  ARNs too.
+- `bedrock:Retrieve` is the action that authorizes the knowledge-base query the
+  retriever tool makes at runtime.
+
+**Simpler (broader) alternative for a throwaway demo account:** instead of the
+inline policy, choose **Add permissions → Attach policies** and attach the
+AWS-managed **`AmazonBedrockFullAccess`**, **`AmazonS3FullAccess`**, and
+**`IAMFullAccess`**. This is easier but much broader — prefer the scoped inline
+policy above, especially in a shared or production account.
+
+
+**Checkpoint:** The SageMaker execution role has the `CausalIFDemoSetup` inline
+policy (or the three managed policies) attached.
 
 ---
 
@@ -163,6 +264,7 @@ opens and runs. Here you choose how much compute you get.
 
 1. From **SageMaker AI** → **Domains**, open your domain and **Launch** →
    **Studio** for your user profile. SageMaker Studio opens in a new tab.
+   ![SageMaker Studio open in the browser](screenshots/studio-open.png)
 2. In Studio's left sidebar, choose **JupyterLab**.
 3. Choose **Create JupyterLab space**.
    - **Name:** `causalif-mpg`.
@@ -171,17 +273,14 @@ opens and runs. Here you choose how much compute you get.
    - **Instance type:** select **`ml.r5.4xlarge`** (a memory-optimized machine;
      the causal analysis benefits from the extra RAM).
    - **Storage (EBS):** set to **50 GB** (room for packages and data).
-5. Choose **Run space**. The status moves to **Starting**, then **Running** (a
-   couple of minutes).
+5. Choose **Run space**. The status moves to **Starting**, then **Running** (may take upto 10 mins).
+   ![JupyterLab space creation with instance type ml.r5.4xlarge and 50 GB storage](screenshots/space-creation.png)
 6. When it shows **Running**, choose **Open JupyterLab**.
+![JupyterLab space with status Running and the Open JupyterLab button](screenshots/space-running.png)
 
 > **Heads-up on cost:** the `ml.r5.4xlarge` instance is billed per hour while the
 > space is **Running**, whether or not a notebook is executing. **Stop the
 > space** when you take a break (see [Cleanup](#7-cleanup-stop-paying-when-youre-done)).
-
-> _[Screenshot placeholder: JupyterLab space creation with instance type ml.r5.4xlarge and 50 GB storage]_
->
-> _[Screenshot placeholder: Space status = Running with the Open JupyterLab button]_
 
 **Checkpoint:** JupyterLab is open, running on an `ml.r5.4xlarge` space with
 50 GB storage.
@@ -196,6 +295,7 @@ round-trip, no AWS credentials needed.
 **Option A — one command in a terminal (recommended):**
 
 1. In JupyterLab, choose **File** → **New** → **Terminal**.
+![JupyterLab File menu opening a new Terminal](screenshots/jupyter-terminal.png)
 2. Run:
    ```bash
    curl -O https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/causalif-mpg-demo.ipynb
@@ -209,46 +309,143 @@ file browser and select it.
 **If JupyterLab asks you to pick a kernel**, choose the default **Python 3**
 kernel.
 
-> _[Screenshot placeholder: JupyterLab terminal running the curl command]_
->
-> _[Screenshot placeholder: The opened notebook showing its first title cell]_
-
 **Checkpoint:** `causalif-mpg-demo.ipynb` is open in JupyterLab.
 
 ---
 
-## 5. Update the parameters
+## 5. Create a Knowledge Base, then set the notebook parameters
 
-The notebook is designed so you edit **exactly one cell** — the
-**Configuration** cell (section 2, commented `# Config_Cell`). For a default run
-in `us-west-2`, **you usually don't need to change anything.**
+The notebook runs fine on the model's **background knowledge alone** — if you're
+happy with that, you can skip straight to the parameter table at the end of this
+step (leave `KNOWLEDGE_BASE_ID = None`) and go to Step 6.
 
-**When you DO need to edit it:**
+To ground CausalIF's reasoning in domain documents, create an Amazon Bedrock
+**Knowledge Base** and paste its ID into the notebook. The steps below create an
+S3 bucket, upload the reference documents into it, and build the Knowledge Base.
 
-| Situation | What to change |
+> **Region note:** create the bucket and the Knowledge Base in the **same
+> Region** as the notebook's `AWS_REGION` (default `us-west-2`). Keep Block
+> Public Access **on** — the Knowledge Base reads the bucket through its IAM
+> service role, not public access.
+
+> The `aws` CLI commands below are already authenticated as your SageMaker
+> execution role — no keys to configure. Run them in a **JupyterLab terminal**
+> (**File → New → Terminal**). The bucket name is derived from your AWS account
+> number automatically (via `aws sts get-caller-identity`), so you can paste the
+> commands as-is.
+
+### Step 5.0 — Get the Auto MPG dataset (required)
+
+The notebook reads the observational data from `auto-mpg.data` (the `DATA_PATH`
+in Section 3). This step is required whether or not you use a Knowledge Base.
+
+Download the Auto MPG dataset from the UCI Machine Learning Repository —
+[auto+mpg.zip](https://archive.ics.uci.edu/static/public/9/auto+mpg.zip) — unzip
+it, extract the `auto-mpg.data` file, and place it in the **root (home) of this
+workspace**, the same folder as the notebook.
+
+From a JupyterLab terminal, the whole thing is one paste:
+
+```bash
+curl -fsSL -o auto+mpg.zip https://archive.ics.uci.edu/static/public/9/auto+mpg.zip
+unzip -o auto+mpg.zip auto-mpg.data
+```
+
+**Checkpoint:** `auto-mpg.data` sits next to `causalif-mpg-demo.ipynb`. If you're
+running on background knowledge only (no Knowledge Base), you can skip the rest
+of Step 5 and go to Step 6 — just leave `KNOWLEDGE_BASE_ID = None`.
+
+### Step 5.1 — Create an S3 bucket (or reuse an existing one)
+
+The commands below build a globally-unique bucket name from your **AWS account
+number** automatically, so you can copy-paste them as-is. Run them together in
+the same terminal session (the `BUCKET` variable is reused in Step 5.2).
+
+```bash
+# Region for the bucket + Knowledge Base (match the notebook's AWS_REGION)
+REGION=us-west-2
+
+# Look up your AWS account number (no need to type it in)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Derive a unique bucket name from the account number.
+# The "causalif-analyticon2026-" prefix matches the S3 permissions granted
+# to the execution role in Step 2 - keep this prefix or the upload will be denied.
+BUCKET=causalif-analyticon2026-$ACCOUNT_ID
+echo "Bucket: $BUCKET"
+
+# Create the bucket
+aws s3 mb s3://$BUCKET --region $REGION
+```
+
+To **reuse an existing bucket** instead, skip `aws s3 mb` and point the variable
+at it: `BUCKET=my-existing-bucket`. Note the Step 2 policy only allows buckets
+whose name starts with `causalif-analyticon2026-`; to use a differently-named
+bucket, widen the S3 `Resource` ARNs in that policy accordingly.
+
+### Step 5.2 — Download the reference documents from GitHub and upload to S3
+
+Pull the demo's reference documents from the public GitHub repo, then upload them
+to your bucket under a `knowledge-base/` prefix — all from the CLI, no manual
+download/upload. This reuses the `$BUCKET` variable from Step 5.1:
+
+```bash
+# 1. Download the reference documents from GitHub into a local folder
+mkdir -p kb-docs
+BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base
+curl -fsSL -o kb-docs/fuel_economy_primer.md "$BASE/fuel_economy_primer.md"
+curl -fsSL -o kb-docs/epa_trends_report.pdf "$BASE/epa_trends_report.pdf"
+
+# 2. Upload them to your bucket under the knowledge-base/ prefix
+aws s3 cp kb-docs/ s3://$BUCKET/knowledge-base/ --recursive
+
+# 3. (Optional) confirm the upload
+aws s3 ls s3://$BUCKET/knowledge-base/
+```
+
+You can also add your own domain documents (PDF, TXT, Markdown, HTML, CSV, Word)
+to the same prefix — for this MPG example, useful docs describe how engine size,
+weight, and horsepower affect fuel economy.
+
+> _[Screenshot placeholder: S3 bucket showing the knowledge-base/ prefix with the uploaded files]_
+
+### Step 5.3 — Create the Knowledge Base in the console
+
+1. Open the **Amazon Bedrock console** → left nav → under **Build**,
+   choose **Knowledge Bases** → **Create Managed KB**.
+   ![alt text](screenshots/kb-create.png)
+2. **Name** the KB (e.g. `causalif-mpg-kb`).
+3. **IAM permissions:** let the console **create and use a new service role**.
+4. **Data source:** choose **Amazon S3** and set the S3 URI to your uploaded
+   prefix: `s3://<your-bucket>/knowledge-base/`. If you need the exact name, run
+   `echo s3://$BUCKET/knowledge-base/` in the terminal from Step 5.1, or use
+   **Browse S3** to pick the `causalif-analyticon2026-<account-id>` bucket.
+5. Review and choose **Create Knowledge Base**. Provisioning takes a few minutes;
+   wait for the status to become **Available** and Sync completed.
+![alt text](screenshots/kb-available.png)
+6.On the Knowledge Base overview page, copy the **Knowledge Base ID** (a short
+string like `ABCD1234EF`).
+
+### Step 5.6 — Set the notebook parameters
+
+Open the notebook and edit the **Section 3 configuration cell**
+(`# --- Configurable settings ---`):
+
+| Parameter | What to set it to |
 |---|---|
-| Running in a Region other than `us-west-2` | Set `AWS_REGION` to your supported Region (e.g. `"us-east-1"`, `"eu-west-1"`) **and** set `BEDROCK_MODEL_ID` to the matching Claude profile for that Region (e.g. `us.` prefix for US, `eu.` for EU). |
-| You already have a knowledge base | Paste its id into `KNOWLEDGE_BASE_ID` — the setup cell then skips provisioning. |
-| You want to skip the knowledge base entirely | Set `RUN_BOOTSTRAP = False` and leave `KNOWLEDGE_BASE_ID = ""`. The notebook runs on the model's background knowledge alone. |
-| You want a specific bucket name | Set `TARGET_BUCKET` to a name you own. Leave it `None` to auto-generate a unique name of the form `causalif-analyticon2026-<uuid>`. |
+| `AWS_REGION` | Your Region. Default `"us-west-2"`. Must match where you created the bucket/KB and where `BEDROCK_MODEL_ID` is available. |
+| `BEDROCK_MODEL_ID` | A **current** Claude model ID for your Region. Default `"us.anthropic.claude-sonnet-4-5-20250929-v1:0"` (US Claude Sonnet 4.5). For EU use the matching `eu.` profile. Avoid older/Legacy models (see Troubleshooting). |
+| `KNOWLEDGE_BASE_ID` | Paste the Knowledge Base ID you copied in Step 5.3, e.g. `"ABCD1234EF"`. **Leave it as `None` to skip the KB** and run on background knowledge alone. |
 
-For reference, the automated-setup knobs in the same cell are:
+When `KNOWLEDGE_BASE_ID` is set, the notebook's Section 5 cell builds a retriever
+and Section 6 passes it to CausalIF. When it's `None`, the retriever is skipped
+automatically — no other edits needed.
 
-- `RUN_BOOTSTRAP` — whether the first cell provisions the bucket + knowledge base (default `True`).
-- `GITHUB_RAW_BASE` / `KB_DOC_FILES` — the public GitHub raw base URL and the list of reference-document filenames the docs are downloaded **from**.
-- `TARGET_BUCKET` / `TARGET_KB_PREFIX` — where the docs are uploaded **to** in your account.
-- `KB_NAME` / `KB_ROLE_NAME` — names for the managed knowledge base and its IAM role.
-- `KB_NUM_RESULTS` — passages the retriever returns per query.
+![alt text](screenshots/notebook-parameters.png)
 
-> **Region, model, and knowledge base must agree.** `AWS_REGION` has to be a
-> Region that supports managed knowledge bases **and** where you enabled
-> `BEDROCK_MODEL_ID`. A mismatch is the usual cause of "access denied", "model
-> not available", or knowledge-base-creation errors.
-
-> _[Screenshot placeholder: The Config_Cell showing AWS_REGION, BEDROCK_MODEL_ID, and RUN_BOOTSTRAP]_
-
-**Checkpoint:** The Config_Cell matches your Region and model (defaults are fine
-for `us-west-2`).
+**Checkpoint:** Either `KNOWLEDGE_BASE_ID = None` (background-knowledge run), or
+it holds your synced Knowledge Base's ID, and `AWS_REGION` / `BEDROCK_MODEL_ID`
+match your environment.
 
 ---
 
@@ -262,43 +459,31 @@ one depends on.
 1. From the menu, choose **Run** → **Run All Cells**, **or** click into the
    first cell and press **Shift + Enter** repeatedly to step through (recommended
    your first time, so you can watch each stage).
-2. Watch these milestones:
-   - **1. Setup** — installs the pinned packages, then imports them. The install
-     log ends with `Successfully installed ...`.
+2. Watch these milestones (the notebook's numbered sections):
+   - **1–2. Install & import** — installs `causalif` and `langchain-aws` with
+     `%pip`, then imports them.
      > **You may need to restart the kernel once** after the first install so the
      > new packages are importable: **Kernel** → **Restart Kernel**, then run
      > from the top again.
-   - **Automated setup (Section 0)** — prints numbered progress: `[1/6]` create
-     bucket, `[2/6]` copy documents, `[3/6]` create IAM role, `[4/6]` create the
-     managed knowledge base, `[5/6]` add the data source, `[6/6]` ingest and
-     wait, ending with **"Automated setup complete. KNOWLEDGE_BASE_ID = ..."**.
-     This is the longest step (a few minutes) because it builds and populates the
-     knowledge base. It is safe to re-run — it reuses whatever already exists.
-   - **Retriever tool** — prints a line confirming the retriever tool was created
-     for your knowledge base id.
-   - **3. Data acquisition** — downloads the UCI Auto MPG dataset and prints its
-     shape (~398 rows) and the first 5 rows.
-   - **4. Data preparation** — prints how many records were retained (~392).
-   - **5. Causal analysis** — configures the engine (prints a confirmation naming
-     your Region and model), then runs discovery. This calls Bedrock and takes a
-     little time.
-   - **6. Results presentation** — renders the causal graph, prints an edge
-     table, a written summary with an `Answer:` line, and (if enabled) an
-     interventional "what-if" result.
-3. Read the **`Answer:`** line and the **Conclusion** section at the bottom —
-   that's the response to *"What factors influence MPG in cars?"* for this run.
-4. The notebook also saves an interactive graph (default
-   `causalif-mpg-graph.html`) next to the notebook. Double-click it in the file
-   browser, or right-click → **Download** to view locally.
+   - **3. Region and model configuration** — prints the Region, model, and
+     `Knowledge Base ID` (or `(none - using background knowledge only)`).
+   - **4. Prepare the data** — reads `auto-mpg.data`, cleans it, and prints the
+     analysis factors and row count.
+   - **5. Retriever** — if `KNOWLEDGE_BASE_ID` is set, prints that the retriever
+     was created; otherwise prints that it's skipped.
+   - **6. Configure the engine** — calls `set_causalif_engine` (passing the
+     retriever, or `None`) and prints a confirmation.
+   - **7. Run the causal analysis** — runs `causalif("what influences mpg")`.
+     This makes several Bedrock calls per factor pair, so it takes a little while.
+   - **8. Visualise** — renders the interactive Plotly causal graph.
+   - **9. Save** — writes `result.json` next to the notebook.
+3. Read the analysis **summary** printed by Section 7 and the causal graph from
+   Section 8 — together they answer *"What factors influence MPG in cars?"*.
 
-> _[Screenshot placeholder: Section 0 automated-setup output showing steps [1/6]..[6/6] complete]_
->
 > _[Screenshot placeholder: The rendered causal graph output]_
->
-> _[Screenshot placeholder: The edge table and the Answer: line]_
 
-**Checkpoint:** The notebook ran to the end and the final Conclusion answers the
-business question.
+**Checkpoint:** The notebook ran to the end and produced the causal graph and
+`result.json`.
 
 ---
 
@@ -320,8 +505,8 @@ Do these when you finish so you stop incurring charges:
    `CausalIFAutoMpgKBRole` → delete.
 5. **Delete the SageMaker domain** (optional): SageMaker AI → **Domains** →
    delete if you won't reuse it (delete spaces/apps first).
-6. **Bedrock model access** carries no standing charge (you pay per call), so you
-   can leave it enabled.
+6. **Bedrock models** carry no standing charge (you pay per call) and require no
+   teardown — there's nothing to "disable."
 
 > _[Screenshot placeholder: JupyterLab space with the Stop space button]_
 
@@ -334,8 +519,9 @@ Do these when you finish so you stop incurring charges:
 | Section 0 fails creating the bucket / role | Execution role missing S3 or IAM permission | Attach the policies in Step 2. |
 | Section 0 fails creating the knowledge base | Region doesn't support managed KBs, or missing Bedrock permission | Use a supported Region (e.g. `us-west-2`); confirm `AmazonBedrockFullAccess` (or the scoped Bedrock actions). |
 | "Failed to download reference document from https://raw.githubusercontent.com/..." | Files not pushed/public, or wrong URL | Confirm `GITHUB_RAW_BASE`/`KB_DOC_FILES`; open a raw URL in a browser to verify the files are published (Appendix B). |
-| `AccessDenied` / "You don't have access to the model" in Section 5 | Bedrock model access not enabled, or wrong Region | Enable the model in **Bedrock → Model access** for your Region (Appendix A); confirm `AWS_REGION` and `BEDROCK_MODEL_ID` match. |
-| Retriever cell errors on `Retrieve` | KB id wrong, or `bedrock-agent-runtime:Retrieve` not permitted | Re-run Section 0 to reset `KNOWLEDGE_BASE_ID`; confirm the Bedrock permission. |
+| `AccessDenied` / "You don't have access to the model" in Section 5 | First-time Anthropic use-case form not submitted, IAM/SCP restriction, or wrong Region | Models auto-enable on first use, but Anthropic may require a one-time use-case submission — complete it in **Bedrock → Model catalog** (Appendix A). Confirm no IAM/SCP blocks the model and that `AWS_REGION` / `BEDROCK_MODEL_ID` match. |
+| `ResourceNotFoundException ... Converse operation: Access denied. This Model is marked by provider as Legacy ...` during the analysis (Section 7) | `BEDROCK_MODEL_ID` points at a model the provider has retired (Legacy); access is cut off after 30 days of inactivity. The notebook may truncate the message at "...Access denied. Th", making it look like a permissions error | Set `BEDROCK_MODEL_ID` to a **current** model. In **us-west-2**, `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (Sonnet 4.5) works; find current IDs in **Bedrock → Model catalog**. This is not an IAM problem — no policy change needed. |
+| Retriever cell errors on `Retrieve` | KB id wrong, or `bedrock:Retrieve` not permitted | Re-run Section 0 to reset `KNOWLEDGE_BASE_ID`; confirm the `bedrock:Retrieve` permission (in the Step 2 policy). |
 | "Unable to locate credentials" / token expired | Not running under the SageMaker role, or session expired | Ensure you're inside the SageMaker JupyterLab space; restart the kernel. |
 | Import errors after install | Kernel started before packages installed | **Kernel → Restart Kernel**, then run all cells again. |
 | Empty causal graph | Bedrock throttling emptied the graph | Re-run; the notebook already keeps concurrency low (`max_parallel_queries=2`). |
@@ -361,27 +547,39 @@ Do these when you finish so you stop incurring charges:
 
 ---
 
-## Appendix A: Enable Bedrock model access
+## Appendix A: Bedrock model access
 
-New AWS accounts have Bedrock foundation models turned **off**. Enable the model
-this demo uses:
+**You no longer manually enable model access.** Amazon has retired the "Model
+access" page. Serverless foundation models are automatically enabled across AWS
+commercial Regions the first time they are invoked in your account, so the
+notebook can call the model without any pre-activation step.
 
-1. Open **Amazon Bedrock** and confirm the Region (top-right) is the one you'll
-   run in (default `us-west-2`).
-2. In the left sidebar, choose **Model access** (under **Bedrock configurations**).
-3. Choose **Enable specific models** (or **Manage model access**).
-4. Enable an **Anthropic Claude** model. The notebook default expects a US Claude
-   Sonnet profile in **us-west-2**
-   (`us.anthropic.claude-sonnet-4-20250514-v1:0`). In a different Region, enable
-   the equivalent Claude model available there and set its exact **model ID** as
-   `BEDROCK_MODEL_ID` in Step 5.
-5. Submit and wait until the model's status shows **Access granted**.
+A few things to be aware of:
 
-> **Finding the exact model ID:** on the **Model access** / **Model catalog**
-> page, open the model to see its ID string. Regions use different prefixes
-> (`us.` for the US, `eu.` for Europe), so copy the ID for *your* Region.
+- **Anthropic Claude first-time use.** For Anthropic models, a first-time user
+  may be prompted to submit brief **use-case details** before the first
+  invocation is allowed. If your very first run fails with an access/eligibility
+  message mentioning use-case submission, complete that one-time form in the
+  Bedrock console (**Model catalog** → open the Claude model), then re-run.
+- **Admin restrictions still apply.** Account administrators can restrict which
+  models are usable through **IAM policies** and **Service Control Policies
+  (SCPs)**. If a call is denied, confirm with your admin that the Claude model in
+  your Region isn't blocked by policy. (The execution role also needs
+  `bedrock:InvokeModel` — covered by `AmazonBedrockFullAccess` in Step 2.)
+- **AWS Marketplace models** (not used by this demo's default) require a user
+  with Marketplace permissions to invoke the model once to enable it
+  account-wide.
 
-> _[Screenshot placeholder: Bedrock → Model access with a Claude model showing Access granted]_
+**Confirming the exact model ID for your Region.** The notebook default is the US
+Claude Sonnet 4.5 profile for **us-west-2**
+(`us.anthropic.claude-sonnet-4-5-20250929-v1:0`). Use a **current** model —
+retired/Legacy models fail with `ResourceNotFoundException ... marked by provider
+as Legacy`. To use a different Region or a newer model, open **Amazon Bedrock** →
+**Model catalog**, open the Claude model, and copy its exact **model ID** into
+`BEDROCK_MODEL_ID` (Step 5). Regions use different prefixes (`us.` for the US,
+`eu.` for Europe), so copy the ID for *your* Region.
+
+> _[Screenshot placeholder: Bedrock → Model catalog → Claude model detail showing the model ID]_
 
 ---
 
