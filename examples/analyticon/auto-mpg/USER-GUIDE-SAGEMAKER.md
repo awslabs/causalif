@@ -136,118 +136,17 @@ Bedrock knowledge base, the execution role needs permission to do those things.
 
 1. In the AWS console go to **IAM** → **Roles**.
 2. Find and open the SageMaker execution role from Step 1.
-3. Choose **Add permissions** → **Create inline policy**.
-4. Choose the **JSON** tab. **Delete** whatever is in the editor and **paste**
-   the policy below in its place.
-5. Choose **Next**, give the policy a name (for example `CausalIFDemoSetup`), and
-   choose **Create policy**.
+3. Choose **Add permissions** → **Attach policies**.
+4. Search for and select each of the following three AWS-managed policies:
+   - **`AmazonBedrockFullAccess`**
+   - **`AmazonS3FullAccess`**
+   - **`IAMFullAccess`**
+5. Choose **Add permissions**.
 
-This single inline policy grants everything the setup cell needs — creating the
-S3 bucket and uploading the documents, creating the small IAM role the knowledge
-base assumes, provisioning and syncing the managed knowledge base, querying it,
-and invoking the Bedrock model:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "S3BucketAndDocs",
-      "Effect": "Allow",
-      "Action": [
-        "s3:CreateBucket",
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::causalif-analyticon2026-*",
-        "arn:aws:s3:::causalif-analyticon2026-*/*"
-      ]
-    },
-    {
-      "Sid": "CreateKBServiceRole",
-      "Effect": "Allow",
-      "Action": [
-        "iam:CreateRole",
-        "iam:GetRole",
-        "iam:PutRolePolicy"
-      ],
-      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole"
-    },
-    {
-      "Sid": "PassKBRoleToBedrock",
-      "Effect": "Allow",
-      "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::*:role/CausalIFAutoMpgKBRole",
-      "Condition": {
-        "StringEquals": { "iam:PassedToService": "bedrock.amazonaws.com" }
-      }
-    },
-    {
-      "Sid": "ManagedKnowledgeBase",
-      "Effect": "Allow",
-      "Action": [
-        "bedrock:CreateKnowledgeBase",
-        "bedrock:GetKnowledgeBase",
-        "bedrock:ListKnowledgeBases",
-        "bedrock:CreateDataSource",
-        "bedrock:GetDataSource",
-        "bedrock:ListDataSources",
-        "bedrock:StartIngestionJob",
-        "bedrock:GetIngestionJob",
-        "bedrock:ListIngestionJobs"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "RetrieveAndInvokeModel",
-      "Effect": "Allow",
-      "Action": [
-        "bedrock:Retrieve",
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream",
-        "bedrock:Converse",
-        "bedrock:ConverseStream",
-        "bedrock:Rerank"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-> **Cross-region inference profiles need invoke access on every underlying
-> Region.** The default `BEDROCK_MODEL_ID` is a US inference *profile* (the `us.`
-> prefix) that routes each call to Claude in **us-east-1, us-east-2, or
-> us-west-2**. The `"Resource": "*"` above already covers all of them. If you
-> tighten this statement to specific ARNs, include **both** the inference-profile
-> ARN **and** the foundation-model ARN in each of those three Regions. To keep it
-> simple, leave the `bedrock` invoke actions on `*`.
->
-> Note: this is about *permissions*. A different error —
-> `ResourceNotFoundException ... marked by provider as Legacy` — means the model
-> itself is retired; fix that by choosing a current `BEDROCK_MODEL_ID` (see
-> Troubleshooting), not by changing IAM.
-
-Notes on the policy:
-
-- The S3 statement is scoped to bucket names starting with
-  `causalif-analyticon2026-` (the auto-generated name in the notebook). **If you
-  set a custom `TARGET_BUCKET`, change both `Resource` ARNs** to match your
-  bucket name.
-- The IAM statements are scoped to the single role name `CausalIFAutoMpgKBRole`
-  (the notebook's `KB_ROLE_NAME`). If you change `KB_ROLE_NAME`, update these
-  ARNs too.
-- `bedrock:Retrieve` is the action that authorizes the knowledge-base query the
-  retriever tool makes at runtime.
-
-**Simpler (broader) alternative for a throwaway demo account:** instead of the
-inline policy, choose **Add permissions → Attach policies** and attach the
-AWS-managed **`AmazonBedrockFullAccess`**, **`AmazonS3FullAccess`**, and
-**`IAMFullAccess`**. This is easier but much broader — prefer the scoped inline
-policy above, especially in a shared or production account.
+These three policies together grant everything the notebook needs: creating and
+uploading to S3, creating the IAM role the Knowledge Base assumes, provisioning
+and syncing the managed Knowledge Base, querying it, and invoking the Bedrock
+model.
 
 
 **Checkpoint:** The SageMaker execution role has the `CausalIFDemoSetup` inline
@@ -357,9 +256,37 @@ of Step 5 and go to Step 6 — just leave `KNOWLEDGE_BASE_ID = None`.
 
 ### Step 5.1 — Create an S3 bucket (or reuse an existing one)
 
-The commands below build a globally-unique bucket name from your **AWS account
-number** automatically, so you can copy-paste them as-is. Run them together in
-the same terminal session (the `BUCKET` variable is reused in Step 5.2).
+You can create the bucket from the AWS console (no commands needed) or from the
+JupyterLab terminal. Pick whichever feels more comfortable.
+
+> **Keep your Region consistent.** Create the bucket in the same Region as the
+> notebook's `AWS_REGION` (default **us-west-2**) so the Knowledge Base can
+> read it without cross-region complications.
+
+#### Option A — AWS console (recommended for first-time users)
+
+1. In the AWS console search bar type **S3** and open **Amazon S3**. Confirm the
+   Region in the top-right is **US West (Oregon) / us-west-2**.
+2. Choose **Create bucket**.
+3. **Bucket name:** enter a globally unique name using your AWS account number
+   so it won't clash with anyone else's bucket:
+   ```
+   causalif-analyticon2026-<your-12-digit-account-id>
+   ```
+   Your account ID is shown in the top-right of the console (click your name).
+   Example: `causalif-analyticon2026-123456789012`.
+4. **AWS Region:** confirm it is set to **US West (Oregon) us-west-2**.
+5. **Block Public Access settings:** leave all four checkboxes **checked** (the
+   default). The Knowledge Base accesses the bucket through an IAM service role,
+   not public access.
+6. Leave all other settings at their defaults and choose **Create bucket**.
+
+Note the bucket name — you will need it in Step 5.2 and when configuring the
+Knowledge Base data source in Step 5.3.
+
+#### Option B — JupyterLab terminal (CLI)
+
+Open a terminal in JupyterLab (**File → New → Terminal**) and run:
 
 ```bash
 # Region for the bucket + Knowledge Base (match the notebook's AWS_REGION)
@@ -369,8 +296,6 @@ REGION=us-west-2
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # Derive a unique bucket name from the account number.
-# The "causalif-analyticon2026-" prefix matches the S3 permissions granted
-# to the execution role in Step 2 - keep this prefix or the upload will be denied.
 BUCKET=causalif-analyticon2026-$ACCOUNT_ID
 echo "Bucket: $BUCKET"
 
@@ -378,10 +303,10 @@ echo "Bucket: $BUCKET"
 aws s3 mb s3://$BUCKET --region $REGION
 ```
 
-To **reuse an existing bucket** instead, skip `aws s3 mb` and point the variable
-at it: `BUCKET=my-existing-bucket`. Note the Step 2 policy only allows buckets
-whose name starts with `causalif-analyticon2026-`; to use a differently-named
-bucket, widen the S3 `Resource` ARNs in that policy accordingly.
+The `BUCKET` variable is reused in Step 5.2, so keep this terminal session open.
+
+To **reuse an existing bucket** instead, skip `aws s3 mb` and set:
+`BUCKET=my-existing-bucket`.
 
 ### Step 5.2 — Download the reference documents from GitHub and upload to S3
 
