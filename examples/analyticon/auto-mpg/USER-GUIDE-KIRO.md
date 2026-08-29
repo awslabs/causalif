@@ -51,10 +51,23 @@ Your Kiro IDE (local machine)
   [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
 - **Python 3.11+** available in your environment. Kiro ships with a Python
   extension; alternatively use a virtualenv or conda environment.
-- **The CausalIF repo cloned** into your Kiro workspace. If you haven't already:
+- **The workshop files downloaded** into a local folder you'll open in Kiro.
+  You only need the three files from this demo — no need to clone the whole repo.
+  Download them from the GitHub UI or run these commands in the Kiro terminal:
   ```bash
-  git clone https://github.com/awslabs/causalif.git
+  mkdir -p causalif-workshop/examples/analyticon/auto-mpg
+  cd causalif-workshop/examples/analyticon/auto-mpg
+  BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg
+  curl -fsSL -o causalif-mpg-demo.ipynb   "$BASE/causalif-mpg-demo.ipynb"
+  curl -fsSL -o causalif-byo-data.ipynb   "$BASE/causalif-byo-data.ipynb"
+  curl -fsSL -o USER-GUIDE-KIRO.md        "$BASE/USER-GUIDE-KIRO.md"
   ```
+  Then open the `causalif-workshop` folder in Kiro (**File → Open Folder**).
+
+  > **GitHub UI alternative:** go to
+  > [github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg](https://github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg),
+  > open each file, click **Raw**, and save to your local folder with
+  > **File → Save Page As**.
 
 > **Region note.** This guide defaults to **`us-west-2`**, which supports Amazon
 > Bedrock managed Knowledge Bases and the default Claude model. If you use a
@@ -177,24 +190,46 @@ print("causalif", causalif.__version__)
 ## 3. Create an S3 bucket and upload the knowledge-base documents
 
 The CausalIF Knowledge Base needs two reference documents stored in S3:
-`fuel_economy_primer.md` and `epa_trends_report.pdf`. The commands below
-download them from the public GitHub repo and upload them to a bucket in your
-account — all from the Kiro terminal.
+`fuel_economy_primer.md` and `epa_trends_report.pdf`. This step creates a
+bucket via the AWS console and then uploads the files from the Kiro terminal.
 
-> **Run these commands in the same terminal session** where your AWS credentials
-> are set (from Step 1). The `BUCKET` variable is reused in Steps 4 and 5.
+> **Keep your Region consistent.** Create the bucket in the same Region as your
+> Knowledge Base (Step 4) and the notebook's `AWS_REGION` — this guide uses
+> **us-west-2** throughout.
+
+### Step 3.1 — Create the S3 bucket in the console
+
+1. Sign in to the [AWS console](https://console.aws.amazon.com/) and confirm the
+   Region in the top-right is **US West (Oregon) / us-west-2**.
+2. In the search bar type **S3** and open **Amazon S3**.
+3. Choose **Create bucket**.
+4. **Bucket name:** enter a globally unique name. A reliable pattern is:
+   ```
+   causalif-kiro-<your-12-digit-account-id>
+   ```
+   Your account ID is visible in the top-right of the console (click your name).
+   Example: `causalif-kiro-123456789012`.
+5. **AWS Region:** confirm it is set to **US West (Oregon) us-west-2**.
+6. **Block Public Access settings:** leave all four options **checked** (on by
+   default). The Knowledge Base accesses the bucket through an IAM service role,
+   not public access.
+7. Leave all other settings at their defaults and choose **Create bucket**.
+8. The console returns you to the bucket list. Your new bucket should appear with
+   **Access** showing **Bucket and objects not public**.
+
+**Note the bucket name** — you will use it in the terminal commands below and
+in the Knowledge Base data source URI (Step 4).
+
+### Step 3.2 — Download the reference documents and upload to the bucket
+
+Run the following commands in the **Kiro terminal** (same session where your
+AWS credentials are set from Step 1). Replace `<YOUR-BUCKET-NAME>` with the
+name you chose above.
 
 ```bash
-# Set the region (must match the notebook's AWS_REGION)
+# Set variables — replace with your actual bucket name and region
+BUCKET=causalif-kiro-<YOUR-ACCOUNT-ID>   # e.g. causalif-kiro-123456789012
 REGION=us-west-2
-
-# Derive a unique bucket name from your AWS account number
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-BUCKET=causalif-kiro-$ACCOUNT_ID
-echo "Using bucket: $BUCKET"
-
-# Create the bucket
-aws s3 mb s3://$BUCKET --region $REGION
 
 # Download the reference documents from the public GitHub repo
 mkdir -p kb-docs
@@ -202,7 +237,7 @@ BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon
 curl -fsSL -o kb-docs/fuel_economy_primer.md "$BASE/fuel_economy_primer.md"
 curl -fsSL -o kb-docs/epa_trends_report.pdf  "$BASE/epa_trends_report.pdf"
 
-# Upload them to your bucket
+# Upload them to your bucket under a knowledge-base/ prefix
 aws s3 cp kb-docs/ s3://$BUCKET/knowledge-base/ --recursive
 
 # Confirm the upload
@@ -213,7 +248,8 @@ You should see both files listed. You can also add your own domain documents
 (PDF, TXT, Markdown) to the same prefix — for this MPG example, documents
 explaining how engine size, weight, and horsepower affect fuel economy work well.
 
-**Checkpoint:** `aws s3 ls s3://$BUCKET/knowledge-base/` lists
+**Checkpoint:** The S3 bucket exists in us-west-2, and
+`aws s3 ls s3://$BUCKET/knowledge-base/` lists
 `fuel_economy_primer.md` and `epa_trends_report.pdf`.
 
 ---
@@ -274,24 +310,24 @@ the data source synced. Or you have decided to skip the KB and will use
 ### Get the Auto MPG dataset (required)
 
 The demo notebook reads `auto-mpg.data`. Download it from the UCI Machine
-Learning Repository and place it next to the notebook:
+Learning Repository and place it **in the same folder as the notebook**:
 
 ```bash
-# Run in the Kiro terminal from inside the repo
-cd examples/analyticon/auto-mpg
+# Run in the Kiro terminal — navigate to the folder where you saved the notebooks
+cd causalif-workshop/examples/analyticon/auto-mpg
 
 curl -fsSL -o auto+mpg.zip https://archive.ics.uci.edu/static/public/9/auto+mpg.zip
 unzip -o auto+mpg.zip auto-mpg.data
 ```
 
-Confirm `auto-mpg.data` is in `examples/analyticon/auto-mpg/`.
+Confirm `auto-mpg.data` is in the same folder as `causalif-mpg-demo.ipynb`.
 
 ### Open the notebook
 
-In the Kiro file explorer, navigate to:
+In the Kiro file explorer, navigate to your workshop folder and open:
 
 ```
-examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
+causalif-workshop/examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
 ```
 
 Click to open it. Kiro will launch a Jupyter kernel for the file.
@@ -363,7 +399,7 @@ Section 8.
 ## 7. Using the BYO data notebook (`causalif-byo-data.ipynb`)
 
 The BYO data notebook is a generic template for running CausalIF on your own CSV.
-Open it in Kiro from `examples/analyticon/auto-mpg/causalif-byo-data.ipynb` and
+Open it in Kiro from `causalif-workshop/examples/analyticon/auto-mpg/causalif-byo-data.ipynb` and
 update the configuration cell:
 
 ```python
