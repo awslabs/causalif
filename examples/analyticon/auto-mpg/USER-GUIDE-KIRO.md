@@ -19,12 +19,11 @@ through temporary credentials you paste into the terminal.
 ## What you'll do
 
 1. **Connect to AWS** from the Kiro terminal using Isengard or Conduit credentials.
-2. **Set up your Python environment** (install packages, verify Bedrock access).
-3. **Create an S3 bucket** and upload the knowledge-base reference documents.
-4. **Create an Amazon Bedrock Knowledge Base** pointed at that bucket (optional but recommended).
-5. **Download the dataset** and open the notebook.
-6. **Run the notebook** — CausalIF performs causal discovery and renders the interactive graph.
-7. **Clean up** AWS resources when you're done.
+2. **Create an S3 bucket** and upload the knowledge-base reference documents.
+3. **Create an Amazon Bedrock Knowledge Base** pointed at that bucket (optional but recommended).
+4. **Download the dataset** and open the notebook.
+5. **Run the notebook** — CausalIF performs causal discovery and renders the interactive graph.
+6. **Clean up** AWS resources when you're done.
 
 ```
 Your Kiro IDE (local machine)
@@ -72,7 +71,7 @@ Your Kiro IDE (local machine)
 > **Region note.** This guide defaults to **`us-west-2`**, which supports Amazon
 > Bedrock managed Knowledge Bases and the default Claude model. If you use a
 > different Region, make sure it supports both managed KBs and your chosen
-> `BEDROCK_MODEL_ID`, and update `AWS_REGION` in the notebook parameters (Step 5).
+> `BEDROCK_MODEL_ID`, and update `AWS_REGION` in the notebook parameters (Step 4).
 
 ---
 
@@ -88,13 +87,13 @@ terminal session.
    activity bar).
 2. Navigate to [Isengard](https://isengard.amazon.com/), find the account you
    want to use, and choose **Access Keys**.
+   ![alt text](screenshots/isengard-copy-keys.png)
+   ![alt text](screenshots/isengard-bash-export.png)
 3. Copy the **short-term credentials block** (three `export` lines) and paste it
    directly into the Kiro terminal:
-   ```bash
-   export AWS_ACCESS_KEY_ID="ASIA..."
-   export AWS_SECRET_ACCESS_KEY="..."
-   export AWS_SESSION_TOKEN="..."
-   ```
+
+   ![alt text](screenshots/isengard-bash-export.png)
+   
 4. Optionally set your default region so you don't have to specify it on every CLI call:
    ```bash
    export AWS_DEFAULT_REGION=us-west-2
@@ -145,70 +144,30 @@ Bedrock model listing succeeds.
 
 ---
 
-## 2. Set up your Python environment
-
-You need `causalif`, `langchain-aws`, and their dependencies available in the
-Python kernel Kiro uses for the notebook.
-
-### Option A — Install in a terminal (recommended)
-
-In the Kiro terminal (same session where your AWS credentials are set):
-
-```bash
-pip install causalif==0.1.10 "langchain-aws>=1.6"
-```
-
-This installs into the active Python environment. After the install completes,
-if a Jupyter kernel is already running for this notebook, restart it:
-**Kernel → Restart Kernel** so the newly installed packages are importable.
-
-### Option B — Install from a notebook cell
-
-Add this as the first cell and run it once:
-
-```python
-%pip install causalif==0.1.10 "langchain-aws>=1.6"
-```
-
-After it completes, go to **Kernel → Restart Kernel** and then run all cells
-again from the top.
-
-### Verify the install
-
-Run this in a notebook cell or the terminal:
-
-```python
-import causalif
-import langchain_aws
-print("causalif", causalif.__version__)
-```
-
-**Checkpoint:** Imports succeed without errors.
-
----
-
-## 3. Create an S3 bucket and upload the knowledge-base documents
+## 2. Create an S3 bucket and upload the knowledge-base documents
 
 The CausalIF Knowledge Base needs two reference documents stored in S3:
 `fuel_economy_primer.md` and `epa_trends_report.pdf`. This step creates a
 bucket via the AWS console and then uploads the files from the Kiro terminal.
 
 > **Keep your Region consistent.** Create the bucket in the same Region as your
-> Knowledge Base (Step 4) and the notebook's `AWS_REGION` — this guide uses
+> Knowledge Base (Step 3) and the notebook's `AWS_REGION` — this guide uses
 > **us-west-2** throughout.
 
-### Step 3.1 — Create the S3 bucket in the console
+### Step 2.1 — Create the S3 bucket in the console
 
 1. Sign in to the [AWS console](https://console.aws.amazon.com/) and confirm the
    Region in the top-right is **US West (Oregon) / us-west-2**.
 2. In the search bar type **S3** and open **Amazon S3**.
 3. Choose **Create bucket**.
+![alt text](screenshots/bucket-create.png)
 4. **Bucket name:** enter a globally unique name. A reliable pattern is:
    ```
    causalif-kiro-<your-12-digit-account-id>
    ```
    Your account ID is visible in the top-right of the console (click your name).
    Example: `causalif-kiro-123456789012`.
+   ![alt text](screenshots/bucket-form.png)
 5. **AWS Region:** confirm it is set to **US West (Oregon) us-west-2**.
 6. **Block Public Access settings:** leave all four options **checked** (on by
    default). The Knowledge Base accesses the bucket through an IAM service role,
@@ -218,9 +177,9 @@ bucket via the AWS console and then uploads the files from the Kiro terminal.
    **Access** showing **Bucket and objects not public**.
 
 **Note the bucket name** — you will use it in the terminal commands below and
-in the Knowledge Base data source URI (Step 4).
+in the Knowledge Base data source URI (Step 3).
 
-### Step 3.2 — Download the reference documents and upload to the bucket
+### Step 2.2 — Download the reference documents and upload to the bucket
 
 Run the following commands in the **Kiro terminal** (same session where your
 AWS credentials are set from Step 1). Replace `<YOUR-BUCKET-NAME>` with the
@@ -228,7 +187,13 @@ name you chose above.
 
 ```bash
 # Set variables — replace with your actual bucket name and region
-BUCKET=causalif-kiro-<YOUR-ACCOUNT-ID>   # e.g. causalif-kiro-123456789012
+REGION=us-west-2
+
+# Look up your AWS account number (no need to type it in)
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Derive a unique bucket name from the account number.
+BUCKET=causalif-kiro-$ACCOUNT_ID
 REGION=us-west-2
 
 # Download the reference documents from the public GitHub repo
@@ -254,58 +219,34 @@ explaining how engine size, weight, and horsepower affect fuel economy work well
 
 ---
 
-## 4. Create the Amazon Bedrock Knowledge Base (optional)
+## 3. Create the Amazon Bedrock Knowledge Base (optional)
 
 This step grounds CausalIF's reasoning in the uploaded domain documents. If you
 skip it, CausalIF still works using the LLM's background knowledge alone — just
-leave `KNOWLEDGE_BASE_ID = None` in the notebook parameters (Step 5).
+leave `KNOWLEDGE_BASE_ID = None` in the notebook parameters (Step 4).
 
 You can create the Knowledge Base two ways: via the AWS console (simpler, no code)
 or via the CLI.
 
 ### Option A — AWS console (recommended for first-time setup)
 
-1. Open the [Amazon Bedrock console](https://us-west-2.console.aws.amazon.com/bedrock/)
-   and confirm the Region is **us-west-2** (or your chosen Region).
-2. In the left navigation, under **Build**, choose **Knowledge Bases** →
-   **Create Knowledge Base** → **Knowledge Base with vector store**.
-3. **Name** it (e.g. `causalif-mpg-kb`).
-4. **IAM permissions:** allow the console to **create and use a new service role**.
-5. **Data source:** choose **Amazon S3** and enter the URI of your uploaded
-   documents:
-   ```
-   s3://causalif-kiro-<your-account-id>/knowledge-base/
-   ```
-   Replace `<your-account-id>` with your actual account number, or run
-   `echo s3://$BUCKET/knowledge-base/` in the terminal.
-6. **Embeddings model:** leave the default (Amazon Titan Embeddings).
-7. Review and choose **Create Knowledge Base**. Wait for the status to become
-   **Available** and the data source sync to complete.
-8. On the Knowledge Base overview page, copy the **Knowledge Base ID** —
-   a short alphanumeric string like `ABCD1234EF`. You'll paste this into the
-   notebook in Step 5.
+1. Open the **Amazon Bedrock console** → left nav → under **Build**,
+   choose **Knowledge Bases** → **Create Managed KB**.
+   ![alt text](screenshots/kb-create.png)
+2. **Name** the KB (e.g. `causalif-mpg-kb`).
+3. **IAM permissions:** let the console **create and use a new service role**.
+4. **Data source:** choose **Amazon S3** and set the S3 URI to your uploaded
+   prefix: `s3://<your-bucket>/knowledge-base/`. If you need the exact name, run
+   `echo s3://$BUCKET/knowledge-base/` in the terminal from Step 2.2, or use
+   **Browse S3** to pick the `causalif-analyticon2026-<account-id>` bucket.
+5. Review and choose **Create Knowledge Base**. Provisioning takes a few minutes;
+   wait for the status to become **Available** and Sync completed.
+![alt text](screenshots/kb-available.png)
+6.On the Knowledge Base overview page, copy the **Knowledge Base ID** (a short
+string like `ABCD1234EF`).
 
-### Option B — AWS CLI (one command)
 
-If you prefer the CLI and already have the `$BUCKET` variable set from Step 3,
-you can inspect or manage the KB from the terminal:
-
-```bash
-# List your Knowledge Bases (once created via console)
-aws bedrock-agent list-knowledge-bases --region $REGION \
-  --query "knowledgeBaseSummaries[*].{Name:name,Id:knowledgeBaseId,Status:status}" \
-  --output table
-```
-
-Copy the `Id` value for your Knowledge Base.
-
-**Checkpoint:** You have a Knowledge Base ID, and its status is **Available** with
-the data source synced. Or you have decided to skip the KB and will use
-`KNOWLEDGE_BASE_ID = None`.
-
----
-
-## 5. Download the dataset and open the notebook in Kiro
+## 4. Download the dataset and open the notebook in Kiro
 
 ### Get the Auto MPG dataset (required)
 
@@ -345,7 +286,7 @@ Look for the **Section 3 configuration cell** near the top of the notebook
 |---|---|
 | `AWS_REGION` | Your Region. Default `"us-west-2"`. Must match where your bucket and KB live. |
 | `BEDROCK_MODEL_ID` | A current Claude model ID. Default `"us.anthropic.claude-sonnet-4-5-20250929-v1:0"`. For EU Regions use the matching `eu.` inference profile. |
-| `KNOWLEDGE_BASE_ID` | Paste the KB ID from Step 4 (e.g. `"ABCD1234EF"`), or leave as `None` to run on background knowledge only. |
+| `KNOWLEDGE_BASE_ID` | Paste the KB ID from Step 3 (e.g. `"ABCD1234EF"`), or leave as `None` to run on background knowledge only. |
 
 > **Credential note for local notebooks.** Unlike SageMaker Studio, your
 > notebook kernel does **not** automatically inherit an IAM role. It uses
@@ -361,7 +302,7 @@ in Kiro, and the configuration cell has the correct Region, model ID, and
 
 ---
 
-## 6. Run the notebook
+## 5. Run the notebook
 
 Run the cells **top to bottom, in order**. Each section produces output the next
 depends on.
@@ -375,7 +316,7 @@ depends on.
 
 | Section | What happens |
 |---|---|
-| **1–2. Install & import** | Installs `causalif` and `langchain-aws`, then imports them. If you already installed in Step 2, this is a no-op. **You may need to restart the kernel once** after install (`Kernel → Restart Kernel`), then re-run from the top. |
+| **1–2. Install & import** | Installs `causalif` and `langchain-aws`, then imports them. **You may need to restart the kernel once** after install (`Kernel → Restart Kernel`), then re-run from the top. |
 | **3. Configuration** | Prints the Region, model ID, and Knowledge Base ID (or `none — background knowledge only`). |
 | **4. Load data** | Reads `auto-mpg.data`, cleans it, and prints the analysis factors and row count. |
 | **5. Retriever** | If `KNOWLEDGE_BASE_ID` is set, creates the Bedrock Knowledge Base retriever. Otherwise prints that it is skipped. |
@@ -396,7 +337,7 @@ Section 8.
 
 ---
 
-## 7. Using the BYO data notebook (`causalif-byo-data.ipynb`)
+## 6. Using the BYO data notebook (`causalif-byo-data.ipynb`)
 
 The BYO data notebook is a generic template for running CausalIF on your own CSV.
 Open it in Kiro from `causalif-workshop/examples/analyticon/auto-mpg/causalif-byo-data.ipynb` and
@@ -452,7 +393,7 @@ only, which can lead to misidentified causal directions.
 
 ---
 
-## 8. Cleanup — stop incurring AWS charges
+## 7. Cleanup — stop incurring AWS charges
 
 Once you are done, remove the AWS resources you created:
 
@@ -475,7 +416,7 @@ aws iam delete-role --role-name AmazonBedrockExecutionRoleForKnowledgeBase_...
 
 ---
 
-## 9. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -488,11 +429,11 @@ aws iam delete-role --role-name AmazonBedrockExecutionRoleForKnowledgeBase_...
 | Import errors after install | Kernel started before packages were installed | **Kernel → Restart Kernel**, then re-run all cells. |
 | Empty causal graph | Bedrock throttling emptied all edges | Re-run; the engine already limits concurrency. If it recurs, reduce `max_parallel_queries` in `set_causalif_engine(...)`. |
 | Graph renders but has no arrows | All edges were undirected (no data for both nodes) | Ensure your dataframe contains the factor columns and has enough rows (100+ recommended). |
-| `factor_descriptions` warning in logs | Column definitions not provided | Pass `factor_descriptions` to `set_causalif_engine(...)` — see Section 7. Causal directions may otherwise be misidentified. |
+| `factor_descriptions` warning in logs | Column definitions not provided | Pass `factor_descriptions` to `set_causalif_engine(...)` — see Section 6. Causal directions may otherwise be misidentified. |
 
 ---
 
-## 10. FAQ
+## 9. FAQ
 
 **Do I need SageMaker?**
 No. This guide runs everything locally in Kiro. SageMaker is only needed if you
@@ -519,7 +460,7 @@ quotas and want faster results, you can increase it.
 
 **Can I run this on data stored in S3?**
 Yes. Use `boto3` to download the CSV into a `pandas.DataFrame` before passing it
-to `set_causalif_engine(...)`. See the code snippet in Section 7.
+to `set_causalif_engine(...)`. See the code snippet in Section 6.
 
 **What is `factor_descriptions` for?**
 It gives the LLM plain-English definitions for each column name. Without it, the
@@ -598,7 +539,7 @@ with your account admin if you hit `AccessDeniedException` on any step.
 
 ## Appendix B: Running without a Knowledge Base
 
-You can skip Steps 3 and 4 entirely and run CausalIF with background knowledge only:
+You can skip Steps 2 and 3 entirely and run CausalIF with background knowledge only:
 
 1. Open the notebook.
 2. In the configuration cell (Section 3), set:
