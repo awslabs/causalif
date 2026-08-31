@@ -65,7 +65,7 @@ Your Kiro IDE (local machine)
   ```
   
   Windows:
-    ```bash
+  ```powershell
   mkdir -p causalif-workshop/examples/analyticon/auto-mpg
   cd causalif-workshop/examples/analyticon/auto-mpg
   $BASE = "https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg"
@@ -220,7 +220,7 @@ aws s3 ls s3://$BUCKET/knowledge-base/
 
 Windows:
 
-```bash
+```powershell
 # Set variables — replace with your actual region if needed
 $REGION = "us-west-2"
 
@@ -298,7 +298,7 @@ unzip -o auto+mpg.zip auto-mpg.data
 
 Windows:
 
-```bash
+```powershell
 # Run in the folder where you saved the notebooks
 
 curl.exe -fsSL -o auto+mpg.zip https://archive.ics.uci.edu/static/public/9/auto+mpg.zip
@@ -322,7 +322,7 @@ pip install ipykernel
 
 Windows:
 
-```bash
+```powershell
 python3 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install nbformat
@@ -458,7 +458,7 @@ aws iam delete-role --role-name AmazonBedrockExecutionRoleForKnowledgeBase_...
 
 Windows:
 
-```bash
+```powershell
 # 1. Delete the S3 bucket and its contents
 aws s3 rm "s3://causalif-kiro-$ACCOUNT_ID" --recursive
 aws s3 rb "s3://causalif-kiro-$ACCOUNT_ID"
