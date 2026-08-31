@@ -48,20 +48,32 @@ Your Kiro IDE (local machine)
   admin before starting.
 - **AWS CLI installed** locally (`aws --version`). If not installed, follow the
   [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
-- **Python 3.11+** available in your environment. Kiro ships with a Python
+- **Python 3.12+** available in your environment. Kiro ships with a Python
   extension; alternatively use a virtualenv or conda environment.
 - **The workshop files downloaded** into a local folder you'll open in Kiro.
-  You only need the three files from this demo — no need to clone the whole repo.
-  Download them from the GitHub UI or run these commands in the Kiro terminal:
+  You only need these files from this demo — no need to clone the whole repo.
+  Download them from the GitHub UI or run these commands in the Kiro terminal.   
+  Note, if you are going to do the workshop in "BYO data" mode, then no need to curl the MGP demo notebook.
+
+  Mac:
   ```bash
   mkdir -p causalif-workshop/examples/analyticon/auto-mpg
   cd causalif-workshop/examples/analyticon/auto-mpg
   BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg
   curl -fsSL -o causalif-mpg-demo.ipynb   "$BASE/causalif-mpg-demo.ipynb"
   curl -fsSL -o causalif-byo-data.ipynb   "$BASE/causalif-byo-data.ipynb"
-  curl -fsSL -o USER-GUIDE-KIRO.md        "$BASE/USER-GUIDE-KIRO.md"
   ```
-  Then open the `causalif-workshop` folder in Kiro (**File → Open Folder**).
+  
+  Windows:
+    ```bash
+  mkdir -p causalif-workshop/examples/analyticon/auto-mpg
+  cd causalif-workshop/examples/analyticon/auto-mpg
+  $BASE = "https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg"
+  curl.exe -fsSL -o causalif-mpg-demo.ipynb "$BASE/causalif-mpg-demo.ipynb"
+  curl.exe -fsSL -o causalif-byo-data.ipynb "$BASE/causalif-byo-data.ipynb"
+  ```
+  
+  Next open the `causalif-workshop` folder in Kiro (**File → Open Folder**).
 
   > **GitHub UI alternative:** go to
   > [github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg](https://github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg),
@@ -144,7 +156,7 @@ Bedrock model listing succeeds.
 
 ---
 
-## 2. Create an S3 bucket and upload the knowledge-base documents
+## 2. Create an S3 bucket and upload the knowledge-base documents (Optional)
 
 The CausalIF Knowledge Base needs two reference documents stored in S3:
 `fuel_economy_primer.md` and `epa_trends_report.pdf`. This step creates a
@@ -185,6 +197,8 @@ Run the following commands in the **Kiro terminal** (same session where your
 AWS credentials are set from Step 1). Replace `<YOUR-BUCKET-NAME>` with the
 name you chose above.
 
+Mac:
+
 ```bash
 # Set variables — replace with your actual bucket name and region
 REGION=us-west-2
@@ -207,6 +221,31 @@ aws s3 cp kb-docs/ s3://$BUCKET/knowledge-base/ --recursive
 
 # Confirm the upload
 aws s3 ls s3://$BUCKET/knowledge-base/
+```
+
+Windows:
+
+```bash
+# Set variables — replace with your actual region if needed
+$REGION = "us-west-2"
+
+# Look up your AWS account number
+$ACCOUNT_ID = aws sts get-caller-identity --query Account --output text
+
+# Derive a unique bucket name from the account number
+$BUCKET = "causalif-kiro-$ACCOUNT_ID"
+
+# Download the reference documents from the public GitHub repo
+New-Item -ItemType Directory -Force -Path kb-docs | Out-Null
+$BASE = "https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/knowledge-base"
+curl.exe -fsSL -o kb-docs/fuel_economy_primer.md "$BASE/fuel_economy_primer.md"
+curl.exe -fsSL -o kb-docs/epa_trends_report.pdf  "$BASE/epa_trends_report.pdf"
+
+# Upload them to your bucket under a knowledge-base/ prefix
+aws s3 cp kb-docs/ "s3://$BUCKET/knowledge-base/" --recursive
+
+# Confirm the upload
+aws s3 ls "s3://$BUCKET/knowledge-base/"
 ```
 
 You should see both files listed. You can also add your own domain documents
@@ -251,17 +290,49 @@ string like `ABCD1234EF`).
 ### Get the Auto MPG dataset (required)
 
 The demo notebook reads `auto-mpg.data`. Download it from the UCI Machine
-Learning Repository and place it **in the same folder as the notebook**:
+Learning Repository and place it **in the same folder as the notebook**.
+
+Mac:
 
 ```bash
-# Run in the Kiro terminal — navigate to the folder where you saved the notebooks
-cd causalif-workshop/examples/analyticon/auto-mpg
+# Run in the folder where you saved the notebooks
 
 curl -fsSL -o auto+mpg.zip https://archive.ics.uci.edu/static/public/9/auto+mpg.zip
 unzip -o auto+mpg.zip auto-mpg.data
 ```
 
+Windows:
+
+```bash
+# Run in the folder where you saved the notebooks
+
+curl.exe -fsSL -o auto+mpg.zip https://archive.ics.uci.edu/static/public/9/auto+mpg.zip
+Expand-Archive -Force auto+mpg.zip -DestinationPath .
+```
+
 Confirm `auto-mpg.data` is in the same folder as `causalif-mpg-demo.ipynb`.
+
+### Create a Python virtual environment for Kiro Jupyter Notebooks
+
+In order to run Jupyter Notebooks in Kiro IDE, we need to install a couple of packages as follows.
+
+Mac:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install nbformat
+pip install ipykernel
+```
+
+Windows:
+
+```bash
+python3 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install nbformat
+pip install ipykernel
+```
 
 ### Open the notebook
 
@@ -271,7 +342,16 @@ In the Kiro file explorer, navigate to your workshop folder and open:
 causalif-workshop/examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
 ```
 
-Click to open it. Kiro will launch a Jupyter kernel for the file.
+Click to open it.
+
+Near the top-right of Kiro, click on **Select Kernel**. Then choose **Select Kernel...**
+
+Finally, choose the **.venv** virtual environment.
+
+![alt text](screenshots/select-kernel.png)
+
+
+
 
 > **BYO data notebook:** If you want to run CausalIF on your own dataset,
 > open `causalif-byo-data.ipynb` in the same folder. It follows the same
@@ -354,48 +434,18 @@ DOMAINS             = ["your domain", "e.g. finance", "supply_chain"]
 ```
 
 Place your CSV file in the same folder as the notebook (or provide an absolute
-path). For S3-stored data, you can read it with:
+path).
 
-```python
-import boto3, io, pandas as pd
+In **Section 4. Prepare the data** it is recommended to use Kiro in vibe-coding mode to explore your dataset, do any data cleansing that's necessary, exclude non factor columns, and author the factor descriptions.
 
-s3 = boto3.client("s3", region_name=AWS_REGION)
-obj = s3.get_object(Bucket="your-bucket", Key="path/to/your-data.csv")
-df = pd.read_csv(io.BytesIO(obj["Body"].read()))
-```
-
-For `factor_descriptions` (strongly recommended — see below), store a Markdown
-file in S3 and point the engine at it:
-
-```python
-set_causalif_engine(
-    ...
-    factor_descriptions="s3://your-bucket/causalif/factor_descriptions.md",
-)
-```
-
-The file should list each column with a plain-English definition, for example:
-
-```markdown
-# Factor Definitions
-- cylinders: number of engine cylinders
-- displacement: engine displacement in cubic inches
-- horsepower: engine output power in hp
-- weight: vehicle weight in pounds
-- acceleration: 0-60 mph time in seconds
-- model_year: model year (70–82)
-- origin: manufacturing origin (1=US, 2=Europe, 3=Japan)
-- mpg: miles per gallon (fuel efficiency)
-```
-
-Without `factor_descriptions`, the LLM reasons about abbreviated column names
-only, which can lead to misidentified causal directions.
 
 ---
 
 ## 7. Cleanup — stop incurring AWS charges
 
 Once you are done, remove the AWS resources you created:
+
+Mac:
 
 ```bash
 # 1. Delete the S3 bucket and its contents
@@ -409,6 +459,23 @@ aws bedrock-agent delete-knowledge-base --knowledge-base-id $KB_ID --region $REG
 # 3. (Optional) Delete the IAM service role the console created for the KB
 aws iam delete-role-policy --role-name AmazonBedrockExecutionRoleForKnowledgeBase_... --policy-name ...
 aws iam delete-role --role-name AmazonBedrockExecutionRoleForKnowledgeBase_...
+```
+
+Windows:
+
+```bash
+# 1. Delete the S3 bucket and its contents
+aws s3 rm "s3://causalif-kiro-$ACCOUNT_ID" --recursive
+aws s3 rb "s3://causalif-kiro-$ACCOUNT_ID"
+
+# 2. Delete the Knowledge Base (if you created one)
+$KB_ID = "<paste your KB ID here>"
+aws bedrock-agent delete-knowledge-base --knowledge-base-id $KB_ID --region $REGION
+
+# 3. (Optional) Delete the IAM service role the console created for the KB
+$ROLE_NAME = "AmazonBedrockExecutionRoleForKnowledgeBase_..."
+aws iam delete-role-policy --role-name $ROLE_NAME --policy-name "..."
+aws iam delete-role --role-name $ROLE_NAME
 ```
 
 > **Bedrock models** carry no standing charge — you pay only per API call,
