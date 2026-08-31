@@ -67,7 +67,7 @@ follow the numbered actions.
   [Appendix A: Bedrock model access](#appendix-a-bedrock-model-access) for details.
 - **The reference documents are published on GitHub.** The notebook downloads
   them from the public repo at
-  `https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base/`.
+  `https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/knowledge-base/`.
   This is provided for you; you don't upload anything there. (Organizers: see
   [Appendix B](#appendix-b-for-the-workshop-organizer--publish-the-files) to
   publish the files first.)
@@ -197,7 +197,7 @@ round-trip, no AWS credentials needed.
 ![JupyterLab File menu opening a new Terminal](screenshots/jupyter-terminal.png)
 2. Run:
    ```bash
-   curl -O https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/causalif-mpg-demo.ipynb
+   curl -O https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
    ```
 3. In the left file browser, **double-click** `causalif-mpg-demo.ipynb` to open it.
 
@@ -317,7 +317,7 @@ download/upload. This reuses the `$BUCKET` variable from Step 5.1:
 ```bash
 # 1. Download the reference documents from GitHub into a local folder
 mkdir -p kb-docs
-BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base
+BASE=https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/knowledge-base
 curl -fsSL -o kb-docs/fuel_economy_primer.md "$BASE/fuel_economy_primer.md"
 curl -fsSL -o kb-docs/epa_trends_report.pdf "$BASE/epa_trends_report.pdf"
 
@@ -520,15 +520,15 @@ public-bucket setup.
 1. Commit and push these files to the public repo on the `main` branch so they
    resolve at the expected paths:
    ```
-   examples/auto-mpg/causalif-mpg-demo.ipynb
-   examples/auto-mpg/knowledge-base/fuel_economy_primer.md
-   examples/auto-mpg/knowledge-base/epa_trends_report.pdf
+   examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
+   examples/analyticon/auto-mpg/knowledge-base/fuel_economy_primer.md
+   examples/analyticon/auto-mpg/knowledge-base/epa_trends_report.pdf
    ```
 2. Verify each raw URL returns the file (HTTP 200), for example:
    ```bash
-   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/causalif-mpg-demo.ipynb
-   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base/fuel_economy_primer.md
-   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/auto-mpg/knowledge-base/epa_trends_report.pdf
+   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/causalif-mpg-demo.ipynb
+   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/knowledge-base/fuel_economy_primer.md
+   curl -I https://raw.githubusercontent.com/awslabs/causalif/main/examples/analyticon/auto-mpg/knowledge-base/epa_trends_report.pdf
    ```
 3. If you publish to a **different repo, branch, or path**, update the notebook's
    Config_Cell before distributing:
@@ -540,4 +540,4 @@ The attendee notebooks only **read** from GitHub; each attendee's own private S3
 bucket (created by the setup cell) holds the uploaded copies that the managed
 knowledge base ingests.
 
-> _[Screenshot placeholder: GitHub repo showing examples/auto-mpg/ with the notebook and knowledge-base/ folder]_
+> _[Screenshot placeholder: GitHub repo showing examples/analyticon/auto-mpg/ with the notebook and knowledge-base/ folder]_
