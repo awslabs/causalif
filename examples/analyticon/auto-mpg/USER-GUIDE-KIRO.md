@@ -72,8 +72,6 @@ Your Kiro IDE (local machine)
   curl.exe -fsSL -o causalif-mpg-demo.ipynb "$BASE/causalif-mpg-demo.ipynb"
   curl.exe -fsSL -o causalif-byo-data.ipynb "$BASE/causalif-byo-data.ipynb"
   ```
-  
-  Next open the `causalif-workshop` folder in Kiro (**File → Open Folder**).
 
   > **GitHub UI alternative:** go to
   > [github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg](https://github.com/awslabs/causalif/tree/main/examples/analyticon/auto-mpg),
@@ -87,16 +85,11 @@ Your Kiro IDE (local machine)
 
 ---
 
-## 1. Connect to AWS from the Kiro terminal
-
-Kiro provides an integrated terminal. All AWS CLI and Python SDK calls made from
-a notebook cell running inside Kiro inherit the environment variables set in that
-terminal session.
+## 1. Connect to AWS from your laptop
 
 ### Option A — Isengard credentials (recommended for Amazon employees)
 
-1. Open a terminal in Kiro: **View → Terminal** (or the terminal icon in the
-   activity bar).
+1. Open a terminal session.
 2. Navigate to [Isengard](https://isengard.amazon.com/), find the account you
    want to use, and choose **Access Keys**.
    ![alt text](screenshots/isengard-copy-keys.png)
@@ -116,14 +109,9 @@ terminal session.
    ```
    You should see a JSON response with your `Account`, `UserId`, and `Arn`.
 
-> **Credential expiry.** Isengard short-term credentials expire after 1 hour. If
-> you get `ExpiredTokenException` mid-run, go back to Isengard, copy fresh
-> credentials, and re-export them in the same terminal. Then restart the Jupyter
-> kernel (**Kernel → Restart Kernel**) and re-run from the top.
-
 ### Option B — Conduit credentials
 
-1. Open a terminal in Kiro.
+1. Open a terminal session.
 2. Run `conduit` to authenticate:
    ```bash
    ada creds update --account <ACCOUNT_ID> --provider conduit --role <ROLE_NAME>
@@ -153,6 +141,13 @@ Bedrock IAM permissions to your role.
 
 **Checkpoint:** `aws sts get-caller-identity` returns your account details, and
 Bedrock model listing succeeds.
+
+
+Now, while in the folder that you will be working in, start Kiro,
+
+```bash
+kiro .
+```
 
 ---
 
